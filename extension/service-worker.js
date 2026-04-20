@@ -287,10 +287,12 @@ async function evalInPage({ tabId, expression }) {
   const [{ result, error }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: (expr) => {
+    func: async (expr) => {
       try {
         // eslint-disable-next-line no-new-func
-        const v = new Function(`return (${expr});`)();
+        let v = new Function(`return (${expr});`)();
+        // If the expression returned a Promise, await it so callers can run async logic.
+        if (v && typeof v.then === "function") v = await v;
         return { ok: true, value: v === undefined ? null : v };
       } catch (e) {
         return { ok: false, error: e?.message ?? String(e) };
