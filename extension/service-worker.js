@@ -123,6 +123,9 @@ async function dispatch(method, params) {
     case "open_url":       return openUrl(params);
     case "type":           return typeInto(params);
     case "eval":           return evalInPage(params);
+    case "click_by_text":  return clickByText(params);
+    case "find_by_text":   return findByText(params);
+    case "fill_submit":    return fillSubmit(params);
     case "computer":       return computer(params);
     default: throw new Error(`unknown method: ${method}`);
   }
@@ -190,10 +193,19 @@ async function click({ tabId, selector }) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     func: (sel) => {
-      const els = document.querySelectorAll(sel);
-      if (els.length === 0) return { success: false, error: `no element matches ${sel}` };
-      if (els.length > 1)  return { success: false, error: `${els.length} elements match ${sel} — must be exactly one` };
-      const el = els[0];
+      // Collect matches from document + every open shadow root so Katal /
+      // Seller Hub / Etsy custom elements are reachable.
+      const found = [];
+      function walk(root) {
+        try {
+          root.querySelectorAll(sel).forEach((e) => found.push(e));
+          root.querySelectorAll("*").forEach((n) => { if (n.shadowRoot) walk(n.shadowRoot); });
+        } catch {}
+      }
+      walk(document);
+      if (found.length === 0) return { success: false, error: `no element matches ${sel}` };
+      if (found.length > 1)  return { success: false, error: `${found.length} elements match ${sel} — narrow the selector or use click_by_text` };
+      const el = found[0];
       el.scrollIntoView({ behavior: "instant", block: "center" });
       el.click();
       return { success: true };
@@ -290,9 +302,24 @@ async function evalInPage({ tabId, expression }) {
     world: "MAIN",
     func: async (expr) => {
       try {
+        // Accept both expression form ("document.title") and statement form
+        // ("const x = ...; return x;"). First try expression semantics —
+        // matches DevTools console behavior. If that throws SyntaxError,
+        // retry as an async function body so `const`/`let`/`var`/`if`/`await`
+        // at the top level all work.
         // eslint-disable-next-line no-new-func
-        let v = new Function(`return (${expr});`)();
-        // If the expression returned a Promise, await it so callers can run async logic.
+        let v;
+        try {
+          v = new Function(`return (${expr});`)();
+        } catch (e1) {
+          if (e1 instanceof SyntaxError) {
+            // eslint-disable-next-line no-new-func
+            const fn = new (Object.getPrototypeOf(async function () {}).constructor)(expr);
+            v = fn();
+          } else {
+            throw e1;
+          }
+        }
         if (v && typeof v.then === "function") v = await v;
         return { ok: true, value: v === undefined ? null : v };
       } catch (e) {
@@ -304,6 +331,285 @@ async function evalInPage({ tabId, expression }) {
   if (error) throw new Error(error);
   if (!result?.ok) throw new Error(result?.error ?? "eval failed");
   return { value: result.value };
+}
+
+/**
+ * Find & optionally click an element by visible text — the primitive the LLM
+ * actually needs. Walks the DOM AND every open shadow root (eBay Katal
+ * components hide buttons inside shadow DOMs, as does Amazon Seller Central).
+ *
+ * Match rules:
+ *   - text is matched case-insensitively as a substring of `textContent`
+ *   - tag filter limits which elements are considered (default: clickable roles)
+ *   - the first *visible* match wins; invisible/zero-size elements are skipped
+ *   - if multiple equally-ranked matches exist, a disambiguation error is
+ *     returned listing them so the caller can narrow via `nth` or `tag`
+ */
+async function findByText({ tabId, text, tag, nth = 0, frameUrlContains } = {}) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: !!frameUrlContains },
+    world: "MAIN",
+    func: (needle, tag, nth, frameUrlContains) => {
+      if (frameUrlContains && !location.href.includes(frameUrlContains)) {
+        return { ok: false, skipFrame: true };
+      }
+      const wanted = (needle || "").toLowerCase().trim();
+      const tags = tag
+        ? [tag.toLowerCase()]
+        : ["button", "a", "[role=button]", "[role=link]", "[role=menuitem]", "[role=tab]",
+           "input[type=submit]", "input[type=button]", "kat-button", "kat-link", "li", "span", "div"];
+      const selector = tags.join(",");
+
+      // Walk DOM + open shadow roots, collect candidates
+      const candidates = [];
+      function walk(root) {
+        try {
+          root.querySelectorAll(selector).forEach((el) => {
+            const label = (el.innerText || el.textContent || el.getAttribute?.("aria-label") || "").trim();
+            if (!label) return;
+            if (!label.toLowerCase().includes(wanted)) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            candidates.push({ el, label, rect });
+          });
+          // Pierce open shadow roots
+          root.querySelectorAll("*").forEach((n) => {
+            if (n.shadowRoot) walk(n.shadowRoot);
+          });
+        } catch {}
+      }
+      walk(document);
+
+      // Prefer shorter labels (exact-ish matches over "click here to edit listing")
+      candidates.sort((a, b) => a.label.length - b.label.length);
+
+      if (candidates.length === 0) return { ok: false, error: `no visible element contains text "${needle}"` };
+      const pick = candidates[nth];
+      if (!pick) return { ok: false, error: `only ${candidates.length} matches for "${needle}" (requested nth=${nth})` };
+
+      // Return the rect so callers can fall back to CDP coordinate click.
+      // Also stash on window so a follow-up click call can re-find it.
+      (window.__autostoreLastFound ||= []).push(pick.el);
+      return {
+        ok: true,
+        label: pick.label.slice(0, 120),
+        rect: { x: pick.rect.x, y: pick.rect.y, width: pick.rect.width, height: pick.rect.height },
+        matchCount: candidates.length,
+        preview: candidates.slice(0, 5).map((c) => c.label.slice(0, 80)),
+      };
+    },
+    args: [text, tag || null, nth, frameUrlContains || null],
+  });
+  // When allFrames is used, executeScript returns one result per frame.
+  // We want the first frame where the element was actually found.
+  const results = Array.isArray(result) ? result : [result];
+  const hit = results.find((r) => r?.ok);
+  if (hit) return hit;
+  const first = results.find((r) => r && !r.skipFrame);
+  throw new Error(first?.error ?? "find_by_text failed");
+}
+
+async function clickByText({ tabId, text, tag, nth = 0, frameUrlContains } = {}) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: !!frameUrlContains },
+    world: "MAIN",
+    func: (needle, tag, nth, frameUrlContains) => {
+      if (frameUrlContains && !location.href.includes(frameUrlContains)) {
+        return { ok: false, skipFrame: true };
+      }
+      const wanted = (needle || "").toLowerCase().trim();
+      const tags = tag
+        ? [tag.toLowerCase()]
+        : ["button", "a", "[role=button]", "[role=link]", "[role=menuitem]", "[role=tab]",
+           "input[type=submit]", "input[type=button]", "kat-button", "kat-link"];
+      const selector = tags.join(",");
+      const candidates = [];
+      function walk(root) {
+        try {
+          root.querySelectorAll(selector).forEach((el) => {
+            const label = (el.innerText || el.textContent || el.getAttribute?.("aria-label") || "").trim();
+            if (!label) return;
+            if (!label.toLowerCase().includes(wanted)) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            candidates.push({ el, label });
+          });
+          root.querySelectorAll("*").forEach((n) => {
+            if (n.shadowRoot) walk(n.shadowRoot);
+          });
+        } catch {}
+      }
+      walk(document);
+      candidates.sort((a, b) => a.label.length - b.label.length);
+      if (candidates.length === 0) return { ok: false, error: `no clickable element contains text "${needle}"` };
+      const pick = candidates[nth];
+      if (!pick) return { ok: false, error: `only ${candidates.length} matches for "${needle}" (requested nth=${nth})` };
+      pick.el.scrollIntoView({ behavior: "instant", block: "center" });
+      pick.el.click();
+      return { ok: true, clicked: pick.label.slice(0, 120), matchCount: candidates.length };
+    },
+    args: [text, tag || null, nth, frameUrlContains || null],
+  });
+  const results = Array.isArray(result) ? result : [result];
+  const hit = results.find((r) => r?.ok);
+  if (!hit) {
+    const first = results.find((r) => r && !r.skipFrame);
+    throw new Error(first?.error ?? "click_by_text failed");
+  }
+  // Wait briefly for the click's side effect (modal open/close, nav, etc.),
+  // then capture a ground-truth snapshot so the caller's response carries
+  // the actual post-click page state — makes hallucination impossible.
+  await new Promise((r) => setTimeout(r, 500));
+  try {
+    hit.afterSnapshot = await quickSnapshot(tabId);
+  } catch {}
+  return hit;
+}
+
+/**
+ * Fill a value into a field, click a submit-like button, wait, and return the
+ * post-submit snapshot. Atomic composite so the LLM can't leave the dialog
+ * half-filled and claim success. Either pass `selector` OR `nearLabel` to
+ * locate the input. `submitText` defaults to "Submit" (also matches "Save",
+ * "保存", "Apply" via the tag filter and includes substring).
+ */
+async function fillSubmit({ tabId, selector, nearLabel, value, submitText = "Submit", submitTag } = {}) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (sel, nearLabel, value, submitText, submitTag) => {
+      // --- Locate the input ---
+      let input = null;
+      function walkFind(root, predicate) {
+        const out = [];
+        function recur(r) {
+          try {
+            Array.from(r.querySelectorAll("input,textarea,[contenteditable='true']"))
+              .forEach((e) => { if (predicate(e)) out.push(e); });
+            r.querySelectorAll("*").forEach((n) => { if (n.shadowRoot) recur(n.shadowRoot); });
+          } catch {}
+        }
+        recur(root);
+        return out;
+      }
+      if (sel) {
+        input = walkFind(document, (e) => e.matches?.(sel))[0];
+      } else if (nearLabel) {
+        const wanted = nearLabel.toLowerCase();
+        // Find any element whose text matches, then pick the nearest input
+        const textEls = [];
+        function recurText(r) {
+          try {
+            r.querySelectorAll("*").forEach((e) => {
+              const t = (e.innerText || e.textContent || "").trim().toLowerCase();
+              if (t && t.includes(wanted) && t.length < 200) textEls.push(e);
+              if (e.shadowRoot) recurText(e.shadowRoot);
+            });
+          } catch {}
+        }
+        recurText(document);
+        // Also look for visible inputs anywhere and rank by DOM proximity to a text match
+        const inputs = walkFind(document, (e) => {
+          const r = e.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+        if (inputs.length === 1) input = inputs[0];
+        else if (inputs.length > 1 && textEls.length) {
+          // Pick the input whose bounding box is closest to a text-match box
+          let best = null, bestDist = Infinity;
+          const tRects = textEls.map((t) => t.getBoundingClientRect());
+          for (const inp of inputs) {
+            const r = inp.getBoundingClientRect();
+            for (const tr of tRects) {
+              const dx = r.x - tr.x, dy = r.y - tr.y;
+              const d = dx*dx + dy*dy;
+              if (d < bestDist) { bestDist = d; best = inp; }
+            }
+          }
+          input = best;
+        } else {
+          input = inputs[0] || null;
+        }
+      }
+      if (!input) return { ok: false, error: `fill_submit: could not find input (selector=${sel}, nearLabel=${nearLabel})` };
+
+      // --- Set value in a React-friendly way ---
+      input.scrollIntoView({ behavior: "instant", block: "center" });
+      input.focus?.();
+      const tag = input.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") {
+        const proto = tag === "input" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+        setter.call(input, String(value));
+        input.dispatchEvent(new Event("input",  { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (input.isContentEditable) {
+        input.innerText = String(value);
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, data: String(value) }));
+      }
+      const valueSet = (tag === "input" || tag === "textarea") ? input.value : input.innerText;
+
+      // --- Find & click the submit button (by visible text, shadow-aware) ---
+      const submitTags = submitTag
+        ? [submitTag.toLowerCase()]
+        : ["button", "[role=button]", "input[type=submit]", "kat-button"];
+      const selBtn = submitTags.join(",");
+      const needle = (submitText || "").toLowerCase();
+      const btns = [];
+      function walkBtn(r) {
+        try {
+          r.querySelectorAll(selBtn).forEach((e) => {
+            const label = (e.innerText || e.textContent || e.getAttribute?.("aria-label") || "").trim();
+            const rect = e.getBoundingClientRect();
+            if (!label || rect.width === 0 || rect.height === 0) return;
+            if (label.toLowerCase().includes(needle)) btns.push({ e, label });
+          });
+          r.querySelectorAll("*").forEach((n) => { if (n.shadowRoot) walkBtn(n.shadowRoot); });
+        } catch {}
+      }
+      walkBtn(document);
+      btns.sort((a, b) => a.label.length - b.label.length);
+      if (!btns.length) return { ok: false, error: `fill_submit: no submit button with text "${submitText}" (value was set to ${valueSet})` };
+      const btn = btns[0];
+      btn.e.click();
+      return { ok: true, valueSet, clickedLabel: btn.label.slice(0, 80), submitCandidates: btns.length };
+    },
+    args: [selector || null, nearLabel || null, value, submitText, submitTag || null],
+  });
+  if (!result?.ok) throw new Error(result?.error ?? "fill_submit failed");
+  // Wait for submit side effect then snapshot
+  await new Promise((r) => setTimeout(r, 800));
+  try { result.afterSnapshot = await quickSnapshot(tabId); } catch {}
+  return result;
+}
+
+/**
+ * Lightweight page snapshot — title, URL, top visible text (dialogs first),
+ * and whether a <dialog>/role=dialog is currently open. Used to auto-embed
+ * ground truth in tool responses.
+ */
+async function quickSnapshot(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const dialogs = Array.from(document.querySelectorAll("[role=dialog],dialog[open],.modal,.overlay"))
+        .filter((d) => {
+          const r = d.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        })
+        .map((d) => (d.innerText || d.textContent || "").trim().slice(0, 400));
+      const mainText = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 600);
+      return {
+        title: document.title,
+        url: location.href,
+        dialogOpen: dialogs.length > 0,
+        dialogText: dialogs[0] || null,
+        pageTextHead: mainText,
+      };
+    },
+  });
+  return result;
 }
 
 /**

@@ -43,6 +43,42 @@ const schemas = {
     expression: z.string().min(1),
   }),
   /**
+   * Find (optionally in all frames) a visible element by partial visible text.
+   * Returns label, bounding rect, and total match count. Walks open shadow roots.
+   * Use this instead of crafting selectors against React-rendered pages.
+   */
+  find_by_text: z.object({
+    tabId: z.number().int(),
+    text: z.string().min(1),
+    tag: z.string().optional(),
+    nth: z.number().int().nonnegative().optional(),
+    frameUrlContains: z.string().optional(),
+  }),
+  /** Find element by partial visible text and click it. Walks open shadow roots. */
+  click_by_text: z.object({
+    tabId: z.number().int(),
+    text: z.string().min(1),
+    tag: z.string().optional(),
+    nth: z.number().int().nonnegative().optional(),
+    frameUrlContains: z.string().optional(),
+  }),
+  /**
+   * Atomic fill-and-submit for modals / inline edit dialogs. Locates an input
+   * (by CSS selector OR by nearby label text), sets its value React-safely,
+   * clicks the submit button (by visible text, substring match), waits for the
+   * side effect, and returns a ground-truth snapshot (title, URL, whether a
+   * dialog is still open, head of page text). Use this for eBay "Edit quantity"
+   * / "Edit price" / any single-field modal — one call, no skipped steps.
+   */
+  fill_submit: z.object({
+    tabId: z.number().int(),
+    selector: z.string().optional(),
+    nearLabel: z.string().optional(),
+    value: z.string(),
+    submitText: z.string().optional(),
+    submitTag: z.string().optional(),
+  }),
+  /**
    * Computer-use actions — drive the browser like a human via CDP input events.
    *
    * Actions:

@@ -90,8 +90,8 @@ $loginBtn.addEventListener("click", async () => {
   setError("");
 
   try {
-    // 1. Authenticate with AutoStore backend
-    const loginRes = await fetch(`${backend}/auth/login`, {
+    // 1. Authenticate with AutoStore backend (/api prefix required)
+    const loginRes = await fetch(`${backend}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
@@ -116,7 +116,7 @@ $loginBtn.addEventListener("click", async () => {
       const err = await authRes.json().catch(() => ({}));
       throw new Error(
         authRes.status === 401
-          ? "Daemon rejected your credentials. Make sure the AutoStore daemon is running."
+          ? `Invalid credentials. ${err.error ?? "Please check your email and password."}`
           : err.error ?? `Daemon auth failed (${authRes.status})`
       );
     }
@@ -131,6 +131,9 @@ $loginBtn.addEventListener("click", async () => {
       autoStoreUser: user,
       autoStoreBackend: backend,
     });
+
+    // Kick the service worker to reconnect immediately
+    chrome.runtime.sendMessage({ type: "reconnect" }).catch(() => {});
 
     showLoggedIn(user);
     setStatus("✅ Connected to daemon", "ok");

@@ -110,7 +110,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse, ctx: HttpCt
     // Validate the JWT by calling the backend's /auth/me endpoint.
     const backend = ctx.backendUrl ?? "https://api.spriterock.com";
     try {
-      const resp = await fetch(`${backend}/auth/me`, {
+      const resp = await fetch(`${backend}/api/auth/me`, {
         headers: { Authorization: `Bearer ${parsed.jwt}` },
       });
       if (!resp.ok) {
