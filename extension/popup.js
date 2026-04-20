@@ -16,9 +16,9 @@ async function refresh() {
   // Badge text == extension status; surface it here too.
   const text = await chrome.action.getBadgeText({});
   $status.textContent = text === "ON"
-    ? "✅ connected to bridge"
+    ? "✅ connected to daemon"
     : text === "OFF"
-      ? "⚠ not connected. Start the bridge and re-save."
+      ? "⚠ not connected. Start the daemon and re-save."
       : "… connecting";
 }
 

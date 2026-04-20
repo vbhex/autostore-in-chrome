@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd user agent for the autostore-in-chrome daemon.
+
+  Install:
+    mkdir -p ~/Library/LaunchAgents
+    cp scripts/com.autostore.in-chrome.plist ~/Library/LaunchAgents/
+    # Edit the two paths below to match your checkout and node binary.
+    launchctl load ~/Library/LaunchAgents/com.autostore.in-chrome.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.autostore.in-chrome.plist
+    rm ~/Library/LaunchAgents/com.autostore.in-chrome.plist
+
+  Logs:
+    ~/Library/Logs/autostore-in-chrome.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autostore.in-chrome</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- EDIT THESE TWO PATHS: node binary + absolute path to dist/index.js -->
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/YOU/Documents/autostore/in-chrome/daemon/dist/index.js</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/autostore-in-chrome.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/autostore-in-chrome.log</string>
+</dict>
+</plist>

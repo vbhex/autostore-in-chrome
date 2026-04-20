@@ -1,10 +1,17 @@
 # autostore-in-chrome
 
-**Chrome extension + local MCP bridge that lets the AutoStore agent drive the
-user's real Chrome** — no separate Playwright browser, no cookie transplant,
-no fresh logins. Alongside `browser-mcp` (which gives the LLM a *scripted*
-Chromium), this gives it the user's *actual* Chrome with all its existing
-sessions.
+**Chrome extension + local HTTP/WS daemon that lets the AutoStore app drive
+the user's real Chrome** — no separate Playwright browser, no cookie
+transplant, no fresh logins. Alongside `browser-mcp` (which gives a *scripted*
+Chromium), this gives AutoStore the user's *actual* Chrome with all its
+existing sessions (1688, eBay, Amazon, Etsy, …).
+
+## No Claude Code dependency
+
+This project is **NOT** an MCP server. The target users are in mainland
+China and cannot reach Claude Code. The daemon exposes a plain
+**HTTP + WebSocket API on 127.0.0.1**, and the AutoStore Mac app / backend
+call it directly using any LLM provider (DeepSeek, Qwen, Kimi, Zhipu, …).
 
 ## When to use which
 
@@ -14,69 +21,112 @@ sessions.
 | Day-to-day listing work alongside a human | OK | ✅ preferred |
 | Fresh machine, no login state | ✅ (scripted login helper) | ❌ needs user's Chrome logged in |
 | Anti-bot fingerprint | Playwright (gets flagged sometimes) | Real Chrome (never flagged) |
-| Reuses 1688 / eBay / Amazon / Etsy existing logins | ❌ (must re-login per profile) | ✅ zero setup |
+| Reuses 1688 / eBay / Amazon / Etsy logins | ❌ (must re-login per profile) | ✅ zero setup |
 
-Agents should try `autostore-in-chrome` first and fall back to `browser-mcp`
-when the bridge reports `connected:false`.
+AutoStore should try `autostore-in-chrome` first and fall back to
+`browser-mcp` when the daemon reports `connected:false`.
 
 ## Architecture
 
 ```
-┌─────────────────┐  stdio (MCP)  ┌──────────────────┐  ws://127.0.0.1:43117  ┌────────────────────┐
-│ Claude Code /   │ ────────────▶ │  bridge (Node)   │ ◀───────────────────── │ Chrome extension   │
-│ Mac app agent   │               │  — this repo     │                        │ service worker     │
-└─────────────────┘               └──────────────────┘                        └────────────────────┘
-                                           ▲                                             │
-                                           │                                             │ chrome.debugger / chrome.tabs
-                                   token in ~/.autostore-in-chrome/token                 ▼
-                                                                                   user's real tabs
+┌──────────────────┐   HTTP    ┌────────────────────┐   WS    ┌────────────────────┐
+│ AutoStore Mac    │ ────────▶ │  daemon (Node)     │ ◀────── │ Chrome extension   │
+│ app / backend    │  POST /rpc│  — this repo       │         │ service worker     │
+└──────────────────┘           └────────────────────┘         └────────────────────┘
+                                        ▲                                │
+                                token in ~/.autostore-in-chrome/token    │ chrome.debugger
+                                                                         ▼  chrome.tabs
+                                                                   user's real tabs
 ```
 
-1. **bridge/** — Node process. Stdio MCP server on one side, localhost
-   WebSocket on the other. Generates an auth token on first run under
-   `~/.autostore-in-chrome/token` (0600 perms). Never binds to 0.0.0.0.
+Two halves:
+
+1. **daemon/** — Long-running Node process. Listens on `127.0.0.1:43117`.
+   - HTTP: `POST /rpc` (bearer token) and `GET /health` (unauthenticated).
+   - WS: `/ws` — the Chrome extension's service worker connects here.
+   - Token is auto-generated on first run under `~/.autostore-in-chrome/token`
+     (0600 perms). Never binds to 0.0.0.0.
 2. **extension/** — MV3 Chrome extension. Service worker connects to the
-   bridge on 127.0.0.1 with the token. Handles RPC calls by dispatching to
-   `chrome.tabs`, `chrome.scripting`, `chrome.debugger`.
+   daemon on 127.0.0.1 with the token. Handles RPC calls by dispatching
+   to `chrome.tabs`, `chrome.scripting`, `chrome.debugger`.
 
-## Wire protocol
+## HTTP API
 
-Symmetric JSON messages over WS:
+### `GET /health` (no auth)
+
+```json
+{
+  "ok": true,
+  "daemonVersion": "0.1.0",
+  "extension": { "connected": true, "connectedSinceMs": 12453, "pendingCalls": 0 },
+  "methods": ["daemon_status", "list_open_tabs", "snapshot", "click"]
+}
+```
+
+Use this for UI status indicators and for probing whether the extension is live.
+
+### `POST /rpc` (bearer token required)
+
+```bash
+TOKEN=$(cat ~/.autostore-in-chrome/token)
+curl -s http://127.0.0.1:43117/rpc \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"method":"list_open_tabs","params":{"urlContains":"1688.com"}}'
+```
+
+Response shape:
+
+```json
+{ "ok": true, "result": [ { "tabId": 42, "url": "...", "title": "..." } ] }
+// or
+{ "ok": false, "error": "AutoStore Chrome extension is not connected..." }
+```
+
+## Built-in methods
+
+| Method | Params | Purpose |
+|---|---|---|
+| `daemon_status` | — | Answered locally by the daemon — is the extension connected? |
+| `list_open_tabs` | `{ urlContains?: string }` | Every tab in the user's Chrome, optionally filtered. |
+| `snapshot` | `{ tabId: number }` | ARIA accessibility tree of a tab (compact YAML-ish). |
+| `click` | `{ tabId: number, selector: string }` | Click a single CSS-selected element. |
+
+Add a new method in two steps:
+1. Add a zod schema in `daemon/src/rpc.ts`.
+2. Add a `case` in `extension/service-worker.js → dispatch()`.
+
+## Wire protocol (daemon ⇄ extension, over WS)
+
+Symmetric JSON messages:
 
 ```ts
-{ type: "hello", token, chromeVersion }            // extension → bridge
-{ type: "hello-ack", bridgeVersion }               // bridge → extension
-{ type: "rpc-request", id, method, params }        // bridge → extension
-{ type: "rpc-response", id, ok, result|error }     // extension → bridge
+{ type: "hello", token, chromeVersion }            // extension → daemon
+{ type: "hello-ack", daemonVersion }               // daemon → extension
+{ type: "rpc-request", id, method, params }        // daemon → extension
+{ type: "rpc-response", id, ok, result|error }     // extension → daemon
 ```
-
-## Tools (MVP)
-
-| Tool | Purpose |
-|------|---------|
-| `bridge_status` | Is an extension connected? Use first when the session starts. |
-| `list_open_tabs` | Every tab in the user's Chrome, optionally filtered by URL substring. |
-| `snapshot` | ARIA accessibility tree of a tab as YAML. |
-| `click` | Click a single CSS-selected element in a tab. |
-
-More follow the same pattern — add a tool def in `bridge/src/tools.ts`, add
-a handler branch in `extension/service-worker.js → dispatch()`.
 
 ## Setup
 
-### Bridge
+### Daemon
 
 ```bash
-cd bridge
+cd daemon
 npm install
 npm run build
-node dist/index.js       # stdio MCP — does nothing alone
+node dist/index.js
+# [daemon] autostore-in-chrome v0.1.0 listening on 127.0.0.1:43117
 ```
 
-Register with Claude Code:
+Auto-start on macOS login:
 
 ```bash
-claude mcp add -s user autostore-in-chrome node /Users/jameswalstonn/Documents/autostore/in-chrome/bridge/dist/index.js
+# Edit scripts/com.autostore.in-chrome.plist and replace the two paths
+# (node binary + absolute path to daemon/dist/index.js)
+mkdir -p ~/Library/LaunchAgents
+cp scripts/com.autostore.in-chrome.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.autostore.in-chrome.plist
 ```
 
 ### Extension (dev — unpacked)
@@ -85,35 +135,39 @@ claude mcp add -s user autostore-in-chrome node /Users/jameswalstonn/Documents/a
 2. **Load unpacked** → pick `in-chrome/extension/`
 3. Click the extension icon in the toolbar → popup opens
 4. Paste the token from `cat ~/.autostore-in-chrome/token` → Save & connect
-5. Badge should go green (**ON**)
+5. Badge goes green (**ON**)
 
 ## Security
 
-- WS binds **127.0.0.1 only**. Loopback is the trust boundary.
-- Token is 32-byte random hex. 0600 perms. Both sides must match or handshake fails.
-- Extension has `debugger` permission, which Chrome flags to the user at install
-  time (yellow "Debugging" banner across the top). That's the price for CDP
-  access. Same permission Playwright uses.
+- HTTP + WS bind **127.0.0.1 only**. Loopback is the trust boundary.
+- Token is 32-byte random hex, 0600 perms. Both daemon and extension must
+  present it — wrong token closes the socket / returns 401.
+- Extension has `debugger` permission, which Chrome flags to the user at
+  install time (yellow "Debugging" banner across the top). That's the
+  price for CDP access — same permission Playwright uses.
+- No TLS. Loopback doesn't need it, and adding certs would only burden
+  the user.
 
-## Mac app integration (future)
+## Mac app integration
 
 The AutoStore Mac app is the natural installer:
-- Bundles extension + bridge binary.
-- Auto-spawns bridge on app launch.
+- Bundles extension (as `.crx` or install instructions) + daemon binary.
+- Installs the launchd plist on first run so the daemon auto-starts.
 - Shows the token in a copy-to-clipboard UI for the user to paste into the
   extension popup once.
-- Badge status is surfaced in the Mac app's main status bar.
+- Polls `GET /health` for the main-window status badge.
 
 ## File layout
 
 ```
 in-chrome/
-  bridge/
+  daemon/
     src/
-      index.ts        — MCP stdio entry
-      ws-server.ts    — localhost WebSocket + RPC to extension
-      tools.ts        — MCP tool defs, forward to bridge.call()
-      handshake.ts    — token + port management
+      index.ts         — entry: load token, start server, wait
+      server.ts        — HTTP (POST /rpc, GET /health) + WS upgrade
+      rpc.ts           — method registry + zod param schemas
+      extension-bus.ts — manages WS from the Chrome extension
+      handshake.ts     — token + port, wire message types
     package.json
     tsconfig.json
   extension/
@@ -122,6 +176,8 @@ in-chrome/
     popup.html
     popup.js          — token/port config UI
     icon128.png
+  scripts/
+    com.autostore.in-chrome.plist  — launchd user agent template
   CLAUDE.md
   .gitignore
 ```

@@ -41,7 +41,7 @@ async function connect() {
   }
 
   try {
-    ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   } catch (e) {
     console.warn("[autostore-in-chrome] WS construct failed:", e);
     scheduleReconnect();
@@ -63,7 +63,7 @@ async function connect() {
     try { msg = JSON.parse(ev.data); }
     catch { return; }
     if (msg.type === "hello-ack") {
-      console.log("[autostore-in-chrome] handshake OK, bridge v" + msg.bridgeVersion);
+      console.log("[autostore-in-chrome] handshake OK, daemon v" + (msg.daemonVersion ?? "?"));
       setBadge("ON", "#1db954");
       return;
     }
@@ -124,17 +124,17 @@ async function dispatch(method, params) {
   }
 }
 
-async function listOpenTabs({ url_contains } = {}) {
+async function listOpenTabs({ urlContains } = {}) {
   const tabs = await chrome.tabs.query({});
-  const filtered = url_contains
-    ? tabs.filter((t) => (t.url ?? "").toLowerCase().includes(url_contains.toLowerCase()))
+  const filtered = urlContains
+    ? tabs.filter((t) => (t.url ?? "").toLowerCase().includes(urlContains.toLowerCase()))
     : tabs;
   return filtered.map((t) => ({
-    tab_id: t.id,
+    tabId: t.id,
     url: t.url,
     title: t.title,
     active: t.active,
-    window_id: t.windowId,
+    windowId: t.windowId,
   }));
 }
 
@@ -143,8 +143,8 @@ async function listOpenTabs({ url_contains } = {}) {
  * isn't available in pure CDP, so we walk the accessibility tree and
  * emit a compact YAML-ish format ourselves.
  */
-async function snapshot({ tab_id }) {
-  const debuggee = { tabId: tab_id };
+async function snapshot({ tabId }) {
+  const debuggee = { tabId };
   await chrome.debugger.attach(debuggee, "1.3");
   try {
     await chrome.debugger.sendCommand(debuggee, "Accessibility.enable");
@@ -182,9 +182,9 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-async function click({ tab_id, selector }) {
-  const [{ result, success }] = await chrome.scripting.executeScript({
-    target: { tabId: tab_id },
+async function click({ tabId, selector }) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
     func: (sel) => {
       const els = document.querySelectorAll(sel);
       if (els.length === 0) return { success: false, error: `no element matches ${sel}` };

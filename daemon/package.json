@@ -1,7 +1,7 @@
 {
-  "name": "autostore-in-chrome-bridge",
+  "name": "autostore-in-chrome-daemon",
   "version": "0.1.0",
-  "description": "MCP stdio server that bridges Claude to the AutoStore Chrome extension.",
+  "description": "Long-running daemon that bridges the AutoStore Chrome extension to any HTTP-speaking client (Mac app, backend, curl).",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
@@ -15,10 +15,8 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
     "ws": "^8.18.0",
-    "zod": "^3.23.8",
-    "zod-to-json-schema": "^3.23.5"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",

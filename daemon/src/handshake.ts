@@ -1,15 +1,10 @@
 /**
- * Handshake + transport config shared between bridge and extension.
+ * Token + port management shared by daemon and extension.
  *
- * Security model: the bridge binds WS to 127.0.0.1 only and emits a random
- * token. The token is written to disk under ~/.autostore-in-chrome/ — a path
- * only processes on this machine can read. The Chrome extension loads the
- * token on startup (via a local file read that only runs inside the extension
- * service worker) and sends it in the first WS message. No token == no bridge.
- *
- * Why not TLS? Loopback is trusted. The extension can't ship a valid cert for
- * 127.0.0.1 anyway; adding self-signed would just teach users to click past
- * browser warnings.
+ * Security model: one random 32-byte hex token, written to
+ * ~/.autostore-in-chrome/token with 0600 perms. Every HTTP client and the
+ * Chrome extension must present this token. Loopback-only server, so we
+ * don't bother with TLS — the trust boundary is the OS user.
  */
 import { homedir } from "os";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
@@ -19,9 +14,8 @@ import { randomBytes } from "crypto";
 const CONFIG_DIR = join(homedir(), ".autostore-in-chrome");
 export const TOKEN_FILE = join(CONFIG_DIR, "token");
 export const PORT_FILE = join(CONFIG_DIR, "port");
-export const DEFAULT_PORT = 43117; // arbitrary; overridden via AUTOSTORE_CHROME_PORT
+export const DEFAULT_PORT = 43117;
 
-/** Ensure the config dir exists and return the token. Generates one if absent. */
 export function loadOrCreateToken(): string {
   mkdirSync(CONFIG_DIR, { recursive: true });
   if (existsSync(TOKEN_FILE)) {
@@ -38,7 +32,7 @@ export function writePort(port: number) {
   writeFileSync(PORT_FILE, String(port), { mode: 0o600 });
 }
 
-/** First message the extension sends. */
+/** First message the extension sends over WS. */
 export interface HelloMessage {
   type: "hello";
   token: string;
@@ -46,13 +40,13 @@ export interface HelloMessage {
   chromeVersion?: string;
 }
 
-/** First message the bridge sends back, on success. */
+/** First message the daemon sends back on success. */
 export interface HelloAckMessage {
   type: "hello-ack";
-  bridgeVersion: string;
+  daemonVersion: string;
 }
 
-/** Any non-hello message — RPC request from bridge, RPC response from extension. */
+/** Daemon → extension: please do this thing. */
 export interface RpcRequest {
   type: "rpc-request";
   id: string;
@@ -60,6 +54,7 @@ export interface RpcRequest {
   params: Record<string, unknown>;
 }
 
+/** Extension → daemon: here's the result. */
 export interface RpcResponse {
   type: "rpc-response";
   id: string;
