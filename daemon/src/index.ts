@@ -16,8 +16,9 @@ async function main() {
   const token = loadOrCreateToken();
   const port = Number(process.env.AUTOSTORE_IN_CHROME_PORT ?? DEFAULT_PORT);
 
+  const backendUrl = process.env.AUTOSTORE_BACKEND_URL ?? "https://api.spriterock.com";
   const bus = new ExtensionBus({ token, daemonVersion: DAEMON_VERSION });
-  const server = createDaemonServer({ token, port, daemonVersion: DAEMON_VERSION, bus });
+  const server = createDaemonServer({ token, port, daemonVersion: DAEMON_VERSION, bus, backendUrl });
 
   await server.listen();
   writePort(port);

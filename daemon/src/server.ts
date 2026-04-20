@@ -22,14 +22,16 @@ export interface DaemonServerOpts {
   port: number;
   daemonVersion: string;
   bus: ExtensionBus;
+  /** AutoStore backend base URL for JWT validation, e.g. https://api.spriterock.com */
+  backendUrl?: string;
 }
 
 export function createDaemonServer(opts: DaemonServerOpts) {
-  const { token, port, daemonVersion, bus } = opts;
+  const { token, port, daemonVersion, bus, backendUrl } = opts;
 
   const http = createServer(async (req, res) => {
     try {
-      await handleHttp(req, res, { token, daemonVersion, bus });
+      await handleHttp(req, res, { token, daemonVersion, bus, backendUrl });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { ok: false, error: msg });
@@ -75,6 +77,7 @@ interface HttpCtx {
   token: string;
   daemonVersion: string;
   bus: ExtensionBus;
+  backendUrl?: string;
 }
 
 async function handleHttp(req: IncomingMessage, res: ServerResponse, ctx: HttpCtx) {
@@ -87,6 +90,39 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse, ctx: HttpCt
       extension: ctx.bus.status(),
       methods: listMethods(),
     });
+    return;
+  }
+
+  // POST /auth — extension exchanges an AutoStore backend JWT for the daemon token.
+  // No daemon token required here; the backend JWT is the credential.
+  if (req.method === "POST" && url.pathname === "/auth") {
+    const body = await readBody(req);
+    let parsed: { jwt?: unknown };
+    try { parsed = JSON.parse(body || "{}"); } catch {
+      sendJson(res, 400, { ok: false, error: "invalid json" });
+      return;
+    }
+    if (typeof parsed.jwt !== "string" || !parsed.jwt) {
+      sendJson(res, 400, { ok: false, error: "missing jwt" });
+      return;
+    }
+
+    // Validate the JWT by calling the backend's /auth/me endpoint.
+    const backend = ctx.backendUrl ?? "https://api.spriterock.com";
+    try {
+      const resp = await fetch(`${backend}/auth/me`, {
+        headers: { Authorization: `Bearer ${parsed.jwt}` },
+      });
+      if (!resp.ok) {
+        sendJson(res, 401, { ok: false, error: "Invalid or expired token. Please sign in again." });
+        return;
+      }
+      // JWT is valid — return the daemon bridge token.
+      sendJson(res, 200, { ok: true, token: ctx.token });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      sendJson(res, 502, { ok: false, error: `Could not reach AutoStore backend: ${msg}` });
+    }
     return;
   }
 
