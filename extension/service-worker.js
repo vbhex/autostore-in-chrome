@@ -122,6 +122,7 @@ async function dispatch(method, params) {
     case "click":          return click(params);
     case "open_url":       return openUrl(params);
     case "type":           return typeInto(params);
+    case "eval":           return evalInPage(params);
     default: throw new Error(`unknown method: ${method}`);
   }
 }
@@ -275,6 +276,31 @@ async function typeInto({ tabId, selector, text, append, submit } = {}) {
   });
   if (!result?.ok) throw new Error(result?.error ?? "type failed");
   return { typed: selector, length: text.length };
+}
+
+/**
+ * Run arbitrary JS in the page's main world. Expression is wrapped so a
+ * bare expression returns its value — same semantics as DevTools console.
+ * Return value must be JSON-serializable.
+ */
+async function evalInPage({ tabId, expression }) {
+  const [{ result, error }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: (expr) => {
+      try {
+        // eslint-disable-next-line no-new-func
+        const v = new Function(`return (${expr});`)();
+        return { ok: true, value: v === undefined ? null : v };
+      } catch (e) {
+        return { ok: false, error: e?.message ?? String(e) };
+      }
+    },
+    args: [expression],
+  });
+  if (error) throw new Error(error);
+  if (!result?.ok) throw new Error(result?.error ?? "eval failed");
+  return { value: result.value };
 }
 
 // ─────────────────────────── lifecycle ───────────────────────────

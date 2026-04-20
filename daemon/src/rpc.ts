@@ -37,6 +37,11 @@ const schemas = {
     /** After typing, also dispatch the Enter key (useful for chat send). */
     submit: z.boolean().optional(),
   }),
+  /** Run a JS expression in the page context. Returns the result (must be JSON-serializable). */
+  eval: z.object({
+    tabId: z.number().int(),
+    expression: z.string().min(1),
+  }),
 } as const;
 
 export type RpcMethod = keyof typeof schemas;
