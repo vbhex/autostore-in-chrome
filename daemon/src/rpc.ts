@@ -23,6 +23,20 @@ const schemas = {
     tabId: z.number().int(),
     selector: z.string().min(1),
   }),
+  /** Open a URL. If tabId is given, navigate that tab; otherwise create a new one. */
+  open_url: z.object({
+    url: z.string().url(),
+    tabId: z.number().int().optional(),
+  }),
+  /** Fill a text field matched by CSS selector. Replaces existing value by default. */
+  type: z.object({
+    tabId: z.number().int(),
+    selector: z.string().min(1),
+    text: z.string(),
+    append: z.boolean().optional(),
+    /** After typing, also dispatch the Enter key (useful for chat send). */
+    submit: z.boolean().optional(),
+  }),
 } as const;
 
 export type RpcMethod = keyof typeof schemas;

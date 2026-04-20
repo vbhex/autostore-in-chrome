@@ -120,6 +120,8 @@ async function dispatch(method, params) {
     case "list_open_tabs": return listOpenTabs(params);
     case "snapshot":       return snapshot(params);
     case "click":          return click(params);
+    case "open_url":       return openUrl(params);
+    case "type":           return typeInto(params);
     default: throw new Error(`unknown method: ${method}`);
   }
 }
@@ -198,6 +200,81 @@ async function click({ tabId, selector }) {
   });
   if (!result?.success) throw new Error(result?.error ?? "click failed");
   return { clicked: selector };
+}
+
+async function openUrl({ url, tabId } = {}) {
+  if (!url) throw new Error("open_url: url required");
+  let tab;
+  if (typeof tabId === "number") {
+    tab = await chrome.tabs.update(tabId, { url, active: true });
+  } else {
+    tab = await chrome.tabs.create({ url, active: true });
+  }
+  // Wait until the tab is done loading (or until 20s).
+  await new Promise((resolve) => {
+    const t = setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdate); resolve(); }, 20_000);
+    function onUpdate(id, info) {
+      if (id === tab.id && info.status === "complete") {
+        clearTimeout(t);
+        chrome.tabs.onUpdated.removeListener(onUpdate);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(onUpdate);
+  });
+  // Refetch to get the final URL (redirects may have happened).
+  const finalTab = await chrome.tabs.get(tab.id);
+  return { tabId: finalTab.id, url: finalTab.url, title: finalTab.title };
+}
+
+/**
+ * Fill a text field in the page. Works with plain <input> / <textarea> AND
+ * contenteditable divs (Wangwang uses the latter). Dispatches input events so
+ * React/Vue re-render.
+ */
+async function typeInto({ tabId, selector, text, append, submit } = {}) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel, text, append, submit) => {
+      const els = document.querySelectorAll(sel);
+      if (els.length === 0) return { ok: false, error: `no element matches ${sel}` };
+      if (els.length > 1)  return { ok: false, error: `${els.length} elements match ${sel} — must be exactly one` };
+      const el = els[0];
+      el.scrollIntoView({ behavior: "instant", block: "center" });
+      el.focus?.();
+      const tag = el.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") {
+        const proto = tag === "input" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+        const newVal = append ? (el.value || "") + text : text;
+        setter.call(el, newVal);
+        el.dispatchEvent(new Event("input",  { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (el.isContentEditable) {
+        if (!append) el.innerHTML = "";
+        // Insert text at caret for better compatibility with rich editors.
+        document.execCommand?.("insertText", false, text);
+        if (!el.innerText.includes(text)) {
+          // Fallback for editors that swallow execCommand.
+          el.textContent = (append ? (el.textContent || "") : "") + text;
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        }
+      } else {
+        return { ok: false, error: `element is not an input/textarea/contenteditable (tag=${tag})` };
+      }
+      if (submit) {
+        for (const type of ["keydown", "keypress", "keyup"]) {
+          el.dispatchEvent(new KeyboardEvent(type, {
+            key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true,
+          }));
+        }
+      }
+      return { ok: true };
+    },
+    args: [selector, text, !!append, !!submit],
+  });
+  if (!result?.ok) throw new Error(result?.error ?? "type failed");
+  return { typed: selector, length: text.length };
 }
 
 // ─────────────────────────── lifecycle ───────────────────────────
