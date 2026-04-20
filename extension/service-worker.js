@@ -123,6 +123,7 @@ async function dispatch(method, params) {
     case "open_url":       return openUrl(params);
     case "type":           return typeInto(params);
     case "eval":           return evalInPage(params);
+    case "computer":       return computer(params);
     default: throw new Error(`unknown method: ${method}`);
   }
 }
@@ -303,6 +304,183 @@ async function evalInPage({ tabId, expression }) {
   if (error) throw new Error(error);
   if (!result?.ok) throw new Error(result?.error ?? "eval failed");
   return { value: result.value };
+}
+
+/**
+ * Computer-use: drive the browser like a human using CDP Input / Page APIs.
+ *
+ * All actions attach the debugger, perform exactly one action, then detach.
+ * Callers should list available tabs first so they can pass the right tabId.
+ */
+async function computer({
+  tabId, action,
+  coordinate, end_coordinate,
+  text, key,
+  scroll_direction, scroll_amount,
+} = {}) {
+  const debuggee = { tabId };
+
+  // Helper: attach debugger (safe to call if already attached from another tool)
+  async function attach() {
+    try { await chrome.debugger.attach(debuggee, "1.3"); }
+    catch (e) {
+      if (!/already/i.test(e?.message ?? "")) throw e;
+      // already attached — fine, continue
+    }
+  }
+
+  // Helper: dispatch a mouse event via CDP
+  async function mouseEvent(type, x, y, button = "left", clickCount = 1, buttons = 0) {
+    const btnMap = { left: 1, right: 2, middle: 4, none: 0 };
+    await chrome.debugger.sendCommand(debuggee, "Input.dispatchMouseEvent", {
+      type, x, y, button,
+      buttons: buttons || btnMap[button] || 0,
+      clickCount,
+    });
+  }
+
+  // Helper: build available-tabs context string for the return value
+  async function tabContext() {
+    const tabs = await chrome.tabs.query({});
+    const lines = tabs.map(t => `  • tabId ${t.id}: "${t.title ?? ""}" (${t.url ?? ""})`);
+    return `Tab Context:\n- Executed on tabId: ${tabId}\n- Available tabs:\n${lines.join("\n")}`;
+  }
+
+  await attach();
+  try {
+    const [x, y] = coordinate ?? [0, 0];
+
+    switch (action) {
+
+      // ── Screenshot ──────────────────────────────────────────────────
+      case "screenshot": {
+        const { data } = await chrome.debugger.sendCommand(
+          debuggee, "Page.captureScreenshot", { format: "png", quality: 85 }
+        );
+        return {
+          screenshot: data,               // base64 PNG
+          mimeType: "image/png",
+          tabContext: await tabContext(),
+        };
+      }
+
+      // ── Clicks ──────────────────────────────────────────────────────
+      case "left_click":
+      case "right_click":
+      case "middle_click": {
+        const btn = action === "left_click" ? "left" : action === "right_click" ? "right" : "middle";
+        await mouseEvent("mousePressed", x, y, btn);
+        await mouseEvent("mouseReleased", x, y, btn);
+        const ctx = await tabContext();
+        return { ok: true, action, coordinate: [x, y], result: `Clicked at (${x}, ${y})\n${ctx}` };
+      }
+
+      case "double_click": {
+        await mouseEvent("mousePressed", x, y, "left", 1);
+        await mouseEvent("mouseReleased", x, y, "left", 1);
+        await mouseEvent("mousePressed", x, y, "left", 2);
+        await mouseEvent("mouseReleased", x, y, "left", 2);
+        const ctx = await tabContext();
+        return { ok: true, action, coordinate: [x, y], result: `Double-clicked at (${x}, ${y})\n${ctx}` };
+      }
+
+      // ── Mouse move ──────────────────────────────────────────────────
+      case "mouse_move": {
+        await mouseEvent("mouseMoved", x, y, "none");
+        const ctx = await tabContext();
+        return { ok: true, action, coordinate: [x, y], result: `Moved mouse to (${x}, ${y})\n${ctx}` };
+      }
+
+      // ── Drag ────────────────────────────────────────────────────────
+      case "left_click_drag": {
+        const [ex, ey] = end_coordinate ?? [x, y];
+        await mouseEvent("mousePressed", x, y, "left", 1, 1);
+        // Move in small increments so sites detect the drag
+        const steps = 10;
+        for (let i = 1; i <= steps; i++) {
+          const ix = Math.round(x + (ex - x) * i / steps);
+          const iy = Math.round(y + (ey - y) * i / steps);
+          await mouseEvent("mouseMoved", ix, iy, "left", 0, 1);
+        }
+        await mouseEvent("mouseReleased", ex, ey, "left", 1);
+        const ctx = await tabContext();
+        return { ok: true, action, coordinate: [x, y], end_coordinate: [ex, ey],
+          result: `Dragged from (${x}, ${y}) to (${ex}, ${ey})\n${ctx}` };
+      }
+
+      // ── Type ─────────────────────────────────────────────────────────
+      case "type": {
+        const str = text ?? "";
+        for (const char of str) {
+          await chrome.debugger.sendCommand(debuggee, "Input.dispatchKeyEvent", {
+            type: "keyDown", text: char, unmodifiedText: char,
+          });
+          await chrome.debugger.sendCommand(debuggee, "Input.dispatchKeyEvent", {
+            type: "keyUp", text: char, unmodifiedText: char,
+          });
+        }
+        const ctx = await tabContext();
+        return { ok: true, action, length: str.length,
+          result: `Typed ${str.length} characters\n${ctx}` };
+      }
+
+      // ── Key ──────────────────────────────────────────────────────────
+      case "key": {
+        const combo = (key ?? "").trim();
+        const parts  = combo.split(/\+(?=[^+])/);
+        const mainKey = parts[parts.length - 1];
+        const modMap = { ctrl: 2, control: 2, shift: 4, alt: 1, meta: 8, command: 8, cmd: 8, win: 8 };
+        let modifiers = 0;
+        for (const p of parts.slice(0, -1)) modifiers |= modMap[p.toLowerCase()] ?? 0;
+
+        // CDP expects the DOM key name (e.g. "Enter", "Tab", "Escape", "ArrowUp")
+        const keyNameMap = {
+          enter: "Enter", return: "Enter", tab: "Tab", esc: "Escape", escape: "Escape",
+          backspace: "Backspace", delete: "Delete", del: "Delete",
+          up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
+          home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown",
+          f1:"F1",f2:"F2",f3:"F3",f4:"F4",f5:"F5",f6:"F6",f7:"F7",f8:"F8",
+          f9:"F9",f10:"F10",f11:"F11",f12:"F12",
+          space: " ", " ": " ",
+        };
+        const cdpKey = keyNameMap[mainKey.toLowerCase()] ?? mainKey;
+
+        await chrome.debugger.sendCommand(debuggee, "Input.dispatchKeyEvent", {
+          type: "keyDown", key: cdpKey, modifiers,
+          text: cdpKey.length === 1 && !modifiers ? cdpKey : "",
+        });
+        await chrome.debugger.sendCommand(debuggee, "Input.dispatchKeyEvent", {
+          type: "keyUp", key: cdpKey, modifiers,
+        });
+        const ctx = await tabContext();
+        return { ok: true, action, key: combo, result: `Pressed key: ${combo}\n${ctx}` };
+      }
+
+      // ── Scroll ───────────────────────────────────────────────────────
+      case "scroll": {
+        const dir    = scroll_direction ?? "down";
+        const amount = scroll_amount ?? 3;
+        const TICK   = 100; // px per tick (matches typical browser line-height)
+        const deltaX = dir === "left" ? -(amount * TICK) : dir === "right" ? (amount * TICK) : 0;
+        const deltaY = dir === "up"   ? -(amount * TICK) : dir === "down"  ? (amount * TICK) : 0;
+
+        await chrome.debugger.sendCommand(debuggee, "Input.dispatchMouseEvent", {
+          type: "mouseWheel", x, y, deltaX, deltaY,
+        });
+        const ctx = await tabContext();
+        return {
+          ok: true, action, coordinate: [x, y],
+          scroll_direction: dir, scroll_amount: amount,
+          result: `Scrolled ${dir} by ${amount} ticks at (${x}, ${y})\n${ctx}`,
+        };
+      }
+
+      default:
+        throw new Error(`unknown computer action: ${action}`);
+    }
+  } finally {
+    try { await chrome.debugger.detach(debuggee); } catch { /* ignore */ }
+  }
 }
 
 // ─────────────────────────── lifecycle ───────────────────────────

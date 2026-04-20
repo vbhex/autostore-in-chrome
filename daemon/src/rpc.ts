@@ -42,6 +42,36 @@ const schemas = {
     tabId: z.number().int(),
     expression: z.string().min(1),
   }),
+  /**
+   * Computer-use actions — drive the browser like a human via CDP input events.
+   *
+   * Actions:
+   *   screenshot   — capture PNG of the tab (returns base64 data)
+   *   left_click   — click at coordinate
+   *   right_click  — right-click at coordinate
+   *   double_click — double-click at coordinate
+   *   mouse_move   — move pointer without clicking
+   *   left_click_drag — drag from coordinate to end_coordinate
+   *   type         — type a string (dispatches key events character by character)
+   *   key          — press a keyboard shortcut, e.g. "Enter", "ctrl+c", "ctrl+shift+t"
+   *   scroll       — scroll at coordinate in a direction by scroll_amount ticks
+   */
+  computer: z.object({
+    tabId: z.number().int(),
+    action: z.enum([
+      "screenshot",
+      "left_click", "right_click", "middle_click", "double_click",
+      "mouse_move", "left_click_drag",
+      "type", "key",
+      "scroll",
+    ]),
+    coordinate:     z.tuple([z.number(), z.number()]).optional(),
+    end_coordinate: z.tuple([z.number(), z.number()]).optional(),
+    text:             z.string().optional(),
+    key:              z.string().optional(),
+    scroll_direction: z.enum(["up", "down", "left", "right"]).optional(),
+    scroll_amount:    z.number().optional(),
+  }),
 } as const;
 
 export type RpcMethod = keyof typeof schemas;
