@@ -202,8 +202,8 @@ async function click({ tabId, selector }) {
 
 // ─────────────────────────── lifecycle ───────────────────────────
 
-chrome.runtime.onInstalled.addListener(() => { connect(); });
-chrome.runtime.onStartup.addListener(() => { connect(); });
+chrome.runtime.onInstalled.addListener(() => { connect(); ensureKeepaliveAlarm(); });
+chrome.runtime.onStartup.addListener(() => { connect(); ensureKeepaliveAlarm(); });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.bridgeToken || changes.bridgePort)) {
     // Reconnect with new credentials.
@@ -212,5 +212,42 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+// ─────────────────────────── MV3 keepalive ───────────────────────────
+// MV3 service workers get suspended after ~30s of inactivity, which
+// silently drops our WS. Two defenses running in parallel:
+//
+//   1. chrome.alarms fires every 25s. Each alarm event wakes the SW if
+//      it was suspended and re-runs the handler, which reconnects the
+//      WS if it's not OPEN. Minimum period in unpacked is 30s, but Chrome
+//      rounds ours up and we still get at-most 30s cold windows.
+//
+//   2. When the WS is open, we also send a "ping" frame every 20s.
+//      Incoming messages reset the SW idle timer, so the daemon will
+//      write a pong back that keeps us hot between alarm fires.
+//
+// Either mechanism alone is insufficient — together the extension stays
+// connected indefinitely.
+
+const KEEPALIVE_ALARM = "autostore-in-chrome-keepalive";
+
+function ensureKeepaliveAlarm() {
+  chrome.alarms.get(KEEPALIVE_ALARM, (existing) => {
+    if (!existing) {
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+    }
+  });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  // Reconnect if WS is dead; no-op if it's healthy.
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connect();
+  } else {
+    try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+  }
+});
+
 // Kick it off once at worker boot.
+ensureKeepaliveAlarm();
 connect();

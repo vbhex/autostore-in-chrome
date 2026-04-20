@@ -33,6 +33,7 @@ export class ExtensionBus {
   private activeSocket: WebSocket | null = null;
   private pending = new Map<string, Pending>();
   private lastConnectedAt = 0;
+  private keepaliveTimer: NodeJS.Timeout | null = null;
 
   constructor(private opts: ExtensionBusOpts) {}
 
@@ -62,6 +63,15 @@ export class ExtensionBus {
         this.lastConnectedAt = Date.now();
         ws.send(JSON.stringify({ type: "hello-ack", daemonVersion: this.opts.daemonVersion }));
         process.stderr.write(`[daemon] extension connected (chrome=${hello.chromeVersion ?? "?"})\n`);
+        this.startKeepalive();
+        return;
+      }
+
+      // Extension-initiated keepalive frame (see service-worker.js). Each
+      // message we send/receive resets the MV3 service-worker idle timer,
+      // so a pong keeps the extension warm.
+      if (msg.type === "ping") {
+        try { ws.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
         return;
       }
 
@@ -78,6 +88,7 @@ export class ExtensionBus {
     ws.on("close", () => {
       if (this.activeSocket === ws) {
         this.activeSocket = null;
+        this.stopKeepalive();
         for (const [id, p] of this.pending) {
           p.reject(new Error("extension disconnected"));
           this.pending.delete(id);
@@ -85,6 +96,24 @@ export class ExtensionBus {
         process.stderr.write(`[daemon] extension disconnected\n`);
       }
     });
+  }
+
+  private startKeepalive() {
+    this.stopKeepalive();
+    // MV3 SW gets suspended after ~30s idle. Sending a ping every 20s keeps
+    // the inbound message stream alive (each arrival resets the idle timer).
+    this.keepaliveTimer = setInterval(() => {
+      const ws = this.activeSocket;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+    }, 20_000);
+  }
+
+  private stopKeepalive() {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
   }
 
   isConnected(): boolean {

@@ -63,4 +63,14 @@ export interface RpcResponse {
   error?: string;
 }
 
-export type WireMessage = HelloMessage | HelloAckMessage | RpcRequest | RpcResponse;
+/** Keepalive frame, sent by either side. Purely to reset the MV3 service-worker idle timer. */
+export interface PingMessage { type: "ping" }
+export interface PongMessage { type: "pong" }
+
+export type WireMessage =
+  | HelloMessage
+  | HelloAckMessage
+  | RpcRequest
+  | RpcResponse
+  | PingMessage
+  | PongMessage;
