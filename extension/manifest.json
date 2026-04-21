@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "AutoStore in Chrome",
-  "version": "0.5.1",
-  "description": "Lets the AutoStore agent drive your real Chrome (Seller Hub, Seller Central, Etsy Shop Manager, 1688) via a local bridge.",
+  "name": "AutoStore",
+  "version": "0.5.2",
+  "description": "AutoStore in Chrome",
   "permissions": [
     "tabs",
     "scripting",
