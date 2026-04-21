@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoStore",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "AutoStore in Chrome",
   "permissions": [
     "tabs",
@@ -12,7 +12,17 @@
     "alarms"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://*.ebay.com/*",
+    "https://*.ebay.co.uk/*",
+    "https://*.amazon.com/*",
+    "https://*.amazon.co.uk/*",
+    "https://*.amazon.co.jp/*",
+    "https://*.amazon.de/*",
+    "https://*.etsy.com/*",
+    "https://*.1688.com/*",
+    "https://amos.alibaba.com/*",
+    "https://*.aliexpress.com/*",
+    "https://*.csp.aliexpress.com/*"
   ],
   "background": {
     "service_worker": "service-worker.js",
