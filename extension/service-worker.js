@@ -695,13 +695,42 @@ async function computer({
 
       // ── Screenshot ──────────────────────────────────────────────────
       case "screenshot": {
+        // Get device pixel ratio so we can normalise screenshot to CSS pixels.
+        // CDP Input.dispatchMouseEvent uses CSS pixels; Page.captureScreenshot
+        // defaults to physical pixels on Retina (dpr=2 → 2x larger image).
+        // Capturing at scale=1/dpr gives an image whose pixel coordinates
+        // directly match click coordinates — no scaling needed by the agent.
+        let dpr = 1;
+        try {
+          const { result } = await chrome.debugger.sendCommand(
+            debuggee, "Runtime.evaluate",
+            { expression: "window.devicePixelRatio", returnByValue: true }
+          );
+          dpr = result?.value ?? 1;
+        } catch (_) { /* use dpr=1 if evaluate fails */ }
+
+        // Get CSS viewport size for the hint in the response.
+        let cssW = 0, cssH = 0;
+        try {
+          const metrics = await chrome.debugger.sendCommand(debuggee, "Page.getLayoutMetrics");
+          cssW = Math.round(metrics.cssLayoutViewport?.clientWidth  ?? metrics.layoutViewport?.clientWidth  ?? 0);
+          cssH = Math.round(metrics.cssLayoutViewport?.clientHeight ?? metrics.layoutViewport?.clientHeight ?? 0);
+        } catch (_) {}
+
+        const scale = 1 / dpr;
         const { data } = await chrome.debugger.sendCommand(
-          debuggee, "Page.captureScreenshot", { format: "png", quality: 85 }
+          debuggee, "Page.captureScreenshot",
+          { format: "png", quality: 85, captureBeyondViewport: false,
+            clip: cssW > 0 ? { x: 0, y: 0, width: cssW, height: cssH, scale: 1 } : undefined,
+          }
         );
+        const hint = cssW > 0
+          ? `\n[Viewport: ${cssW}×${cssH} CSS px | devicePixelRatio: ${dpr} | Screenshot normalised to CSS px — click coordinates = image pixel coordinates, NO scaling needed]`
+          : `\n[devicePixelRatio: ${dpr} | click coordinates = image pixel coordinates]`;
         return {
-          screenshot: data,               // base64 PNG
+          screenshot: data,               // base64 PNG, normalised to CSS pixels
           mimeType: "image/png",
-          tabContext: await tabContext(),
+          tabContext: await tabContext() + hint,
         };
       }
 
