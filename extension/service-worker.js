@@ -31,12 +31,47 @@ async function getConfig() {
   return { token: bridgeToken ?? "", port: bridgePort ?? DEFAULT_PORT };
 }
 
+/**
+ * Try to get the bridge token automatically from the daemon using a stored JWT.
+ * Returns the token string, or null if unavailable.
+ */
+async function autoFetchBridgeToken(port) {
+  const { autoStoreJwt, autoStoreBackend } = await chrome.storage.local.get(["autoStoreJwt", "autoStoreBackend"]);
+  if (!autoStoreJwt) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jwt: autoStoreJwt }),
+    });
+    if (!res.ok) {
+      // JWT expired — clear it so the user sees the login screen next time
+      if (res.status === 401) await chrome.storage.local.remove(["autoStoreJwt", "autoStoreUser", "bridgeToken"]);
+      return null;
+    }
+    const { token } = await res.json();
+    if (token) {
+      await chrome.storage.local.set({ bridgeToken: token, bridgePort: port });
+      console.log("[autostore-in-chrome] auto-fetched bridge token from daemon");
+    }
+    return token ?? null;
+  } catch {
+    return null; // daemon not running yet
+  }
+}
+
 async function connect() {
   clearTimeout(reconnectTimer);
-  const { token, port } = await getConfig();
+  let { token, port } = await getConfig();
+
+  // No token stored — try to get one automatically using the saved JWT
   if (!token) {
-    console.log("[autostore-in-chrome] no bridge token configured — open the popup and paste it.");
-    scheduleReconnect(10_000);
+    token = await autoFetchBridgeToken(port) ?? "";
+  }
+
+  if (!token) {
+    console.log("[autostore-in-chrome] no bridge token — sign in via the popup.");
+    scheduleReconnect(15_000);
     return;
   }
 
