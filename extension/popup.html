@@ -7,27 +7,44 @@
     body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 320px; padding: 14px; margin: 0; color: #222; }
     h1 { font-size: 14px; margin: 0 0 4px; }
     .subtitle { color: #666; font-size: 11px; margin: 0 0 14px; }
-    label { display: block; margin-top: 10px; font-weight: 600; font-size: 12px; }
-    input { width: 100%; box-sizing: border-box; padding: 7px 9px; font: 13px system-ui; border: 1px solid #ccc; border-radius: 5px; margin-top: 3px; }
-    input:focus { outline: none; border-color: #1db954; box-shadow: 0 0 0 2px rgba(29,185,84,.15); }
-    button#login { margin-top: 14px; width: 100%; padding: 9px 10px; border: 0; background: #1db954; color: white; font-weight: 600; font-size: 13px; border-radius: 5px; cursor: pointer; }
-    button#login:hover { background: #17a349; }
-    button#login:disabled { background: #aaa; cursor: default; }
+
+    /* Deakee login button */
+    .deakee-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 10px; width: 100%; padding: 10px 14px;
+      background: #f59e0b; border: none; border-radius: 7px;
+      color: #000; font-weight: 700; font-size: 13px; cursor: pointer;
+      box-sizing: border-box; transition: background 0.15s;
+    }
+    .deakee-btn:hover { background: #d97706; }
+    .deakee-btn:disabled { background: #aaa; cursor: default; color: #fff; }
+
     button#logout { margin-top: 8px; width: 100%; padding: 7px 10px; border: 1px solid #ddd; background: #fff; color: #555; font-size: 12px; border-radius: 5px; cursor: pointer; }
     button#logout:hover { background: #f5f5f5; }
+
     .status { margin-top: 12px; padding: 9px 11px; border-radius: 5px; font-size: 12px; line-height: 1.5; }
     .status.ok   { background: #edfbf2; color: #1a6e38; border: 1px solid #b0e8c5; }
     .status.warn { background: #fff8e1; color: #7a5c00; border: 1px solid #ffe082; }
     .status.err  { background: #fff0f0; color: #c00; border: 1px solid #ffcdd2; }
+
     .user-badge { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 10px; background: #f9f9f9; border-radius: 5px; border: 1px solid #eee; }
-    .user-badge .avatar { width: 28px; height: 28px; border-radius: 50%; background: #1db954; color: white; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+    .user-badge .avatar { width: 28px; height: 28px; border-radius: 50%; background: #f59e0b; color: #000; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
     .user-badge .info { font-size: 12px; line-height: 1.4; }
     .user-badge .email { color: #888; font-size: 11px; }
-    .advanced-toggle { font-size: 11px; color: #999; cursor: pointer; text-align: right; margin-top: 6px; }
+
+    .footer-note { margin-top: 12px; text-align: center; font-size: 10px; color: #bbb; }
+    .footer-note a { color: #999; text-decoration: none; }
+    .footer-note a:hover { text-decoration: underline; }
+
+    .error-msg { color: #c00; font-size: 12px; margin-top: 8px; text-align: center; }
+
+    /* Advanced server URL */
+    .advanced-toggle { font-size: 11px; color: #bbb; cursor: pointer; text-align: right; margin-top: 8px; }
     .advanced-toggle:hover { color: #555; }
     .advanced { display: none; }
     .advanced.visible { display: block; }
-    .error-msg { color: #c00; font-size: 12px; margin-top: 6px; }
+    label.adv-label { display: block; margin-top: 8px; font-weight: 600; font-size: 11px; color: #888; }
+    input.adv-input { width: 100%; box-sizing: border-box; padding: 5px 8px; font: 12px system-ui; border: 1px solid #ddd; border-radius: 4px; margin-top: 3px; color: #555; }
   </style>
 </head>
 <body>
@@ -36,20 +53,23 @@
 
   <!-- LOGGED-OUT STATE -->
   <div id="login-section">
-    <label for="email">Email</label>
-    <input id="email" type="email" placeholder="your@email.com" autocomplete="email" />
-
-    <label for="password">Password</label>
-    <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+    <button class="deakee-btn" id="login">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+      Continue with Deakee
+    </button>
 
     <div class="advanced-toggle" id="advanced-toggle">Advanced ▸</div>
     <div class="advanced" id="advanced-section">
-      <label for="backend-url">AutoStore server URL</label>
-      <input id="backend-url" placeholder="https://api.spriterock.com" />
+      <label class="adv-label" for="backend-url">AutoStore server URL</label>
+      <input class="adv-input" id="backend-url" placeholder="https://api.spriterock.com" />
     </div>
 
     <div class="error-msg" id="error-msg"></div>
-    <button id="login">Sign in</button>
+
+    <div class="footer-note">
+      Don't have a Deakee account?
+      <a href="https://deakee.com" target="_blank">Sign up free →</a>
+    </div>
   </div>
 
   <!-- LOGGED-IN STATE -->

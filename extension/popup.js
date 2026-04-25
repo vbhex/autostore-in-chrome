@@ -1,20 +1,21 @@
 /**
- * Popup: email + password login → calls AutoStore backend → exchanges JWT for
- * daemon bridge token → saves to chrome.storage and triggers WS reconnect.
+ * Popup: Deakee OAuth2 login → exchanges code for AutoStore JWT →
+ * exchanges JWT for daemon bridge token → saves to chrome.storage.
  *
  * States:
- *  1. Logged out  — show login form
- *  2. Logged in   — show user badge + logout button + daemon connection status
+ *  1. Logged out  — show "Continue with Deakee" button
+ *  2. Logged in   — show user badge + logout + daemon status
  */
 
-const DEFAULT_BACKEND = "https://api.spriterock.com";
-const DEFAULT_PORT    = 43117;
+const DEFAULT_BACKEND  = "https://api.spriterock.com";
+const DEFAULT_PORT     = 43117;
+const DEAKEE_AUTH_URL  = "https://deakee.com/en/auth/oauth/authorize";
+const OAUTH_CLIENT_ID  = "autostore";
+const OAUTH_SCOPE      = "profile";
 
 // ─── DOM refs ──────────────────────────────────────────────
 const $loginSection    = document.getElementById("login-section");
 const $loggedInSection = document.getElementById("logged-in-section");
-const $email           = document.getElementById("email");
-const $password        = document.getElementById("password");
 const $backendUrl      = document.getElementById("backend-url");
 const $advancedToggle  = document.getElementById("advanced-toggle");
 const $advancedSection = document.getElementById("advanced-section");
@@ -44,12 +45,9 @@ function setError(msg) {
 
 // ─── Load saved state ──────────────────────────────────────
 async function init() {
-  const { bridgeToken, bridgePort, autoStoreJwt, autoStoreUser, autoStoreBackend } =
-    await chrome.storage.local.get([
-      "bridgeToken", "bridgePort", "autoStoreJwt", "autoStoreUser", "autoStoreBackend"
-    ]);
+  const { autoStoreJwt, autoStoreUser, autoStoreBackend } =
+    await chrome.storage.local.get(["autoStoreJwt", "autoStoreUser", "autoStoreBackend"]);
 
-  // Pre-fill backend URL
   $backendUrl.value = autoStoreBackend ?? DEFAULT_BACKEND;
 
   if (autoStoreJwt && autoStoreUser) {
@@ -74,74 +72,107 @@ function showLoggedOut() {
   $errorMsg.textContent          = "";
 }
 
-// ─── Login flow ────────────────────────────────────────────
+// ─── Deakee OAuth2 login ───────────────────────────────────
 $loginBtn.addEventListener("click", async () => {
-  const email    = $email.value.trim();
-  const password = $password.value;
-  const backend  = ($backendUrl.value.trim() || DEFAULT_BACKEND).replace(/\/$/, "");
-
-  if (!email || !password) {
-    setError("Please enter your email and password.");
-    return;
-  }
+  const backend = ($backendUrl.value.trim() || DEFAULT_BACKEND).replace(/\/$/, "");
 
   $loginBtn.disabled    = true;
-  $loginBtn.textContent = "Signing in…";
+  $loginBtn.textContent = "Opening Deakee…";
   setError("");
 
   try {
-    // 1. Authenticate with AutoStore backend (/api prefix required)
-    const loginRes = await fetch(`${backend}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+    // The chromiumapp.org redirect URL is unique to this extension and
+    // is registered in Deakee's oauth2_apps table.
+    const redirectURL = chrome.identity.getRedirectURL();
+
+    const state = Math.random().toString(36).slice(2);
+    const params = new URLSearchParams({
+      client_id:     OAUTH_CLIENT_ID,
+      redirect_uri:  redirectURL,
+      response_type: "code",
+      scope:         OAUTH_SCOPE,
+      state,
+    });
+    const authURL = `${DEAKEE_AUTH_URL}?${params}`;
+
+    // Open Deakee consent page in a browser popup and wait for callback
+    const responseURL = await new Promise((resolve, reject) => {
+      chrome.identity.launchWebAuthFlow(
+        { url: authURL, interactive: true },
+        (url) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (!url) {
+            reject(new Error("Login cancelled"));
+          } else {
+            resolve(url);
+          }
+        }
+      );
     });
 
-    if (!loginRes.ok) {
-      const err = await loginRes.json().catch(() => ({}));
-      throw new Error(err.message ?? `Login failed (${loginRes.status})`);
+    // Extract code from the callback URL
+    const cbParams = new URL(responseURL).searchParams;
+    const code = cbParams.get("code");
+    if (!code) throw new Error("No authorization code received from Deakee");
+
+    $loginBtn.textContent = "Signing in…";
+
+    // 1. Exchange code → AutoStore JWT via backend
+    const exchangeRes = await fetch(`${backend}/api/auth/deakee/exchange`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, redirect_uri: redirectURL }),
+    });
+
+    if (!exchangeRes.ok) {
+      const err = await exchangeRes.json().catch(() => ({}));
+      throw new Error(err.message ?? `Token exchange failed (${exchangeRes.status})`);
     }
 
-    const { access_token: jwt, user } = await loginRes.json();
+    const { access_token: jwt, user } = await exchangeRes.json();
 
     // 2. Exchange JWT for the local daemon bridge token
     const port = DEFAULT_PORT;
-    const authRes = await fetch(`http://127.0.0.1:${port}/auth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jwt }),
-    });
-
-    if (!authRes.ok) {
-      const err = await authRes.json().catch(() => ({}));
-      throw new Error(
-        authRes.status === 401
-          ? `Invalid credentials. ${err.error ?? "Please check your email and password."}`
-          : err.error ?? `Daemon auth failed (${authRes.status})`
-      );
+    let bridgeToken = null;
+    try {
+      const authRes = await fetch(`http://127.0.0.1:${port}/auth`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jwt }),
+      });
+      if (authRes.ok) {
+        const data = await authRes.json();
+        bridgeToken = data.token ?? null;
+      }
+    } catch {
+      // Daemon might not be running yet — that's fine, service worker will retry
     }
 
-    const { token: bridgeToken } = await authRes.json();
-
-    // 3. Persist everything and trigger service worker reconnect
+    // 3. Persist and reconnect
     await chrome.storage.local.set({
-      bridgeToken,
-      bridgePort: port,
       autoStoreJwt: jwt,
       autoStoreUser: user,
       autoStoreBackend: backend,
+      ...(bridgeToken ? { bridgeToken, bridgePort: port } : {}),
     });
 
-    // Kick the service worker to reconnect immediately
     chrome.runtime.sendMessage({ type: "reconnect" }).catch(() => {});
 
     showLoggedIn(user);
-    setStatus("✅ Connected to daemon", "ok");
+    setStatus(
+      bridgeToken ? "✅ Connected to daemon" : "⚠ Signed in — start AutoStore to activate",
+      bridgeToken ? "ok" : "warn"
+    );
   } catch (e) {
-    setError(e.message ?? "Sign in failed.");
+    if (e.message?.includes("cancel") || e.message?.includes("Cancel")) {
+      setError(""); // user dismissed — silent
+    } else {
+      setError(e.message ?? "Sign in failed.");
+    }
   } finally {
     $loginBtn.disabled    = false;
-    $loginBtn.textContent = "Sign in";
+    $loginBtn.textContent = "Continue with Deakee";
   }
 });
 
@@ -156,7 +187,6 @@ $logoutBtn.addEventListener("click", async () => {
 
 // ─── Live status poll ──────────────────────────────────────
 async function refreshStatus() {
-  // Check daemon badge from service worker
   const text = await chrome.action.getBadgeText({});
   if (text === "ON") {
     setStatus("✅ Connected — browser control active", "ok");
