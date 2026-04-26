@@ -48,10 +48,19 @@ async function tryAutoPair(port) {
     const data = await res.json();
     if (!data?.bridgeToken) return null;
 
-    const update = { bridgeToken: data.bridgeToken, bridgePort: port };
-    if (data.user) update.autoStoreUser = data.user;
-    await chrome.storage.local.set(update);
-    console.log("[autostore-in-chrome] auto-paired with daemon" + (data.user ? ` as ${data.user.email}` : ""));
+    // Only write to storage when something actually changed, otherwise the
+    // onChanged listener will close-and-reopen the WS on every popup poll.
+    const existing = await chrome.storage.local.get(["bridgeToken", "bridgePort", "autoStoreUser"]);
+    const update = {};
+    if (existing.bridgeToken !== data.bridgeToken) update.bridgeToken = data.bridgeToken;
+    if (existing.bridgePort  !== port)              update.bridgePort  = port;
+    if (data.user && JSON.stringify(existing.autoStoreUser) !== JSON.stringify(data.user)) {
+      update.autoStoreUser = data.user;
+    }
+    if (Object.keys(update).length > 0) {
+      await chrome.storage.local.set(update);
+      console.log("[autostore-in-chrome] paired with daemon" + (data.user ? ` as ${data.user.email}` : ""));
+    }
     return data.bridgeToken;
   } catch {
     return null; // daemon not running

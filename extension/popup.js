@@ -86,12 +86,15 @@ async function refreshStatus() {
 }
 
 // ─── Boot ──────────────────────────────────────────────────
-// Ask SW to attempt an unauthenticated pair against the local daemon.
-// Succeeds the moment the Mac app is running. We re-sync after every
-// attempt so the UI flips even if storage notifications were missed.
+// Ask SW to attempt an unauthenticated pair when the popup opens. If
+// already paired, just refresh status — don't re-pair (would cause WS
+// reconnect thrash). Re-attempt every 5s only while NOT paired.
 async function attemptPair() {
-  try { await chrome.runtime.sendMessage({ type: "try_pair" }); } catch {}
+  const { bridgeToken, autoStoreUser } = await chrome.storage.local.get(["bridgeToken", "autoStoreUser"]);
+  if (!bridgeToken || !autoStoreUser) {
+    try { await chrome.runtime.sendMessage({ type: "try_pair" }); } catch {}
+  }
   await syncFromStorage();
 }
 attemptPair();
-setInterval(attemptPair, 3000);
+setInterval(attemptPair, 5000);
