@@ -8,17 +8,6 @@
     h1 { font-size: 14px; margin: 0 0 4px; }
     .subtitle { color: #666; font-size: 11px; margin: 0 0 14px; }
 
-    /* Deakee login button */
-    .deakee-btn {
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      margin-top: 10px; width: 100%; padding: 10px 14px;
-      background: #f59e0b; border: none; border-radius: 7px;
-      color: #000; font-weight: 700; font-size: 13px; cursor: pointer;
-      box-sizing: border-box; transition: background 0.15s;
-    }
-    .deakee-btn:hover { background: #d97706; }
-    .deakee-btn:disabled { background: #aaa; cursor: default; color: #fff; }
-
     button#logout { margin-top: 8px; width: 100%; padding: 7px 10px; border: 1px solid #ddd; background: #fff; color: #555; font-size: 12px; border-radius: 5px; cursor: pointer; }
     button#logout:hover { background: #f5f5f5; }
 
@@ -32,47 +21,29 @@
     .user-badge .info { font-size: 12px; line-height: 1.4; }
     .user-badge .email { color: #888; font-size: 11px; }
 
-    .footer-note { margin-top: 12px; text-align: center; font-size: 10px; color: #bbb; }
-    .footer-note a { color: #999; text-decoration: none; }
-    .footer-note a:hover { text-decoration: underline; }
+    .hint-box { display: flex; flex-direction: column; gap: 6px; padding: 14px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 7px; margin-top: 4px; }
+    .hint-box strong { font-size: 13px; color: #1e40af; }
+    .hint-box span { font-size: 11.5px; color: #475569; line-height: 1.5; }
+    .hint-box a { color: #2563eb; text-decoration: none; font-weight: 600; font-size: 12px; }
+    .hint-box a:hover { text-decoration: underline; }
 
-    .error-msg { color: #c00; font-size: 12px; margin-top: 8px; text-align: center; }
-
-    /* Advanced server URL */
-    .advanced-toggle { font-size: 11px; color: #bbb; cursor: pointer; text-align: right; margin-top: 8px; }
-    .advanced-toggle:hover { color: #555; }
-    .advanced { display: none; }
-    .advanced.visible { display: block; }
-    label.adv-label { display: block; margin-top: 8px; font-weight: 600; font-size: 11px; color: #888; }
-    input.adv-input { width: 100%; box-sizing: border-box; padding: 5px 8px; font: 12px system-ui; border: 1px solid #ddd; border-radius: 4px; margin-top: 3px; color: #555; }
+    .footer-note { margin-top: 12px; text-align: center; font-size: 10.5px; color: #aaa; }
   </style>
 </head>
 <body>
   <h1>AutoStore in Chrome</h1>
-  <p class="subtitle">Connect to your AutoStore account to enable browser control.</p>
+  <p class="subtitle">Browser-side companion for the AutoStore Mac app.</p>
 
-  <!-- LOGGED-OUT STATE -->
+  <!-- WAITING-FOR-PAIRING STATE (no Mac app running) -->
   <div id="login-section">
-    <button class="deakee-btn" id="login">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-      Continue with Deakee
-    </button>
-
-    <div class="advanced-toggle" id="advanced-toggle">Advanced ▸</div>
-    <div class="advanced" id="advanced-section">
-      <label class="adv-label" for="backend-url">AutoStore server URL</label>
-      <input class="adv-input" id="backend-url" placeholder="https://api.spriterock.com" />
-    </div>
-
-    <div class="error-msg" id="error-msg"></div>
-
-    <div class="footer-note">
-      Don't have a Deakee account?
-      <a href="https://deakee.com" target="_blank">Sign up free →</a>
+    <div class="hint-box">
+      <strong>Start the AutoStore Mac app to pair</strong>
+      <span>This extension automatically pairs with AutoStore running on this Mac. No separate sign-in needed.</span>
+      <a href="https://spriterock.com/downloads/AutoStore.zip" target="_blank">Download AutoStore for Mac →</a>
     </div>
   </div>
 
-  <!-- LOGGED-IN STATE -->
+  <!-- PAIRED STATE -->
   <div id="logged-in-section" style="display:none">
     <div class="user-badge">
       <div class="avatar" id="avatar-initial">A</div>
@@ -81,10 +52,14 @@
         <div class="email" id="user-email">—</div>
       </div>
     </div>
-    <button id="logout">Sign out</button>
+    <button id="logout">Forget this device</button>
   </div>
 
-  <div class="status" id="status">Checking connection…</div>
+  <div class="status" id="status">Looking for AutoStore…</div>
+
+  <div class="footer-note">
+    Powered by Deakee
+  </div>
 
   <script src="popup.js"></script>
 </body>

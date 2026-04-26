@@ -32,11 +32,40 @@ async function getConfig() {
 }
 
 /**
- * Try to get the bridge token automatically from the daemon using a stored JWT.
- * Returns the token string, or null if unavailable.
+ * Auto-pair with the local daemon. Loopback-only, no auth required.
+ *
+ * The Mac app has already done a Deakee OAuth login and writes the user
+ * identity to ~/.autostore-in-chrome/user.json. The daemon exposes both the
+ * bridge token and that user via GET /pair, so the extension can become
+ * "logged in" with zero clicks the moment the Mac app is running.
+ *
+ * Returns the bridge token on success, null on failure.
+ */
+async function tryAutoPair(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/pair`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.bridgeToken) return null;
+
+    const update = { bridgeToken: data.bridgeToken, bridgePort: port };
+    if (data.user) update.autoStoreUser = data.user;
+    await chrome.storage.local.set(update);
+    console.log("[autostore-in-chrome] auto-paired with daemon" + (data.user ? ` as ${data.user.email}` : ""));
+    return data.bridgeToken;
+  } catch {
+    return null; // daemon not running
+  }
+}
+
+/**
+ * Legacy fallback: extension was logged in via Deakee OAuth (popup), has a
+ * JWT but no bridge token (daemon was offline at the time). Trade JWT for
+ * a bridge token. Used when the Mac app hasn't written user.json (older
+ * Mac builds, or daemon started without the Mac app).
  */
 async function autoFetchBridgeToken(port) {
-  const { autoStoreJwt, autoStoreBackend } = await chrome.storage.local.get(["autoStoreJwt", "autoStoreBackend"]);
+  const { autoStoreJwt } = await chrome.storage.local.get(["autoStoreJwt"]);
   if (!autoStoreJwt) return null;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/auth`, {
@@ -45,18 +74,17 @@ async function autoFetchBridgeToken(port) {
       body: JSON.stringify({ jwt: autoStoreJwt }),
     });
     if (!res.ok) {
-      // JWT expired — clear it so the user sees the login screen next time
       if (res.status === 401) await chrome.storage.local.remove(["autoStoreJwt", "autoStoreUser", "bridgeToken"]);
       return null;
     }
     const { token } = await res.json();
     if (token) {
       await chrome.storage.local.set({ bridgeToken: token, bridgePort: port });
-      console.log("[autostore-in-chrome] auto-fetched bridge token from daemon");
+      console.log("[autostore-in-chrome] fetched bridge token via JWT");
     }
     return token ?? null;
   } catch {
-    return null; // daemon not running yet
+    return null;
   }
 }
 
@@ -64,14 +92,15 @@ async function connect() {
   clearTimeout(reconnectTimer);
   let { token, port } = await getConfig();
 
-  // No token stored — try to get one automatically using the saved JWT
+  // No token stored — try the unauthenticated auto-pair first (Mac app
+  // running on this machine), then fall back to JWT-based pairing.
   if (!token) {
-    token = await autoFetchBridgeToken(port) ?? "";
+    token = (await tryAutoPair(port)) || (await autoFetchBridgeToken(port)) || "";
   }
 
   if (!token) {
-    console.log("[autostore-in-chrome] no bridge token — sign in via the popup.");
-    scheduleReconnect(15_000);
+    console.log("[autostore-in-chrome] daemon not reachable — waiting for AutoStore Mac app to start.");
+    scheduleReconnect(5_000);
     return;
   }
 
@@ -853,90 +882,22 @@ async function computer({
   }
 }
 
-// ─────────────────────────── Deakee OAuth (run from SW) ───────────────────────────
-// We MUST run launchWebAuthFlow from the service worker, not the popup.
-// Popups close when they lose focus, killing any await chain after the OAuth
-// window opens. The SW survives, lets us await the redirect, exchange the code,
-// and persist the JWT — then the popup picks up the new state on next open.
-
-const DEAKEE_AUTH_URL  = "https://deakee.com/en/auth/oauth/authorize";
-const OAUTH_CLIENT_ID  = "autostore";
-const OAUTH_SCOPE      = "profile";
-const DEFAULT_BACKEND  = "https://api.spriterock.com";
-
-async function loginWithDeakee() {
-  const { autoStoreBackend } = await chrome.storage.local.get(["autoStoreBackend"]);
-  const backend = (autoStoreBackend || DEFAULT_BACKEND).replace(/\/$/, "");
-  const redirectURL = chrome.identity.getRedirectURL();
-  const state = Math.random().toString(36).slice(2);
-
-  const params = new URLSearchParams({
-    client_id:     OAUTH_CLIENT_ID,
-    redirect_uri:  redirectURL,
-    response_type: "code",
-    scope:         OAUTH_SCOPE,
-    state,
-  });
-  const authURL = `${DEAKEE_AUTH_URL}?${params}`;
-
-  const responseURL = await new Promise((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow(
-      { url: authURL, interactive: true },
-      (url) => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else if (!url)               reject(new Error("Login cancelled"));
-        else                         resolve(url);
-      }
-    );
-  });
-
-  const code = new URL(responseURL).searchParams.get("code");
-  if (!code) throw new Error("No authorization code received");
-
-  // Exchange code for AutoStore JWT
-  const exchangeRes = await fetch(`${backend}/api/auth/deakee/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code, redirect_uri: redirectURL }),
-  });
-  if (!exchangeRes.ok) {
-    const err = await exchangeRes.json().catch(() => ({}));
-    throw new Error(err.message || `Token exchange failed (${exchangeRes.status})`);
-  }
-  const { access_token: jwt, user } = await exchangeRes.json();
-
-  // Try to also fetch the daemon bridge token (best-effort)
-  const port = 43117;
-  let bridgeToken = null;
-  try {
-    const authRes = await fetch(`http://127.0.0.1:${port}/auth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jwt }),
-    });
-    if (authRes.ok) bridgeToken = (await authRes.json()).token || null;
-  } catch { /* daemon offline — that's fine */ }
-
-  await chrome.storage.local.set({
-    autoStoreJwt: jwt,
-    autoStoreUser: user,
-    autoStoreBackend: backend,
-    ...(bridgeToken ? { bridgeToken, bridgePort: port } : {}),
-  });
-
-  // Trigger a reconnect so the SW picks up the new bridge token
-  if (ws) try { ws.close(); } catch {}
-  connect();
-
-  return { ok: true, user, hasBridge: !!bridgeToken };
-}
+// ─────────────────────────── Pair-on-demand message ───────────────────────────
+// Popup pings us whenever it opens so the user sees the paired state the
+// instant the Mac app starts, without waiting for the next reconnect timer.
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type === "login_with_deakee") {
-    loginWithDeakee()
-      .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
-    return true; // keep channel open for async response
+  if (msg?.type === "try_pair") {
+    (async () => {
+      const { port } = await getConfig();
+      const token = await tryAutoPair(port);
+      if (token) {
+        if (ws) try { ws.close(); } catch {}
+        connect();
+      }
+      sendResponse({ ok: !!token });
+    })();
+    return true;
   }
   if (msg?.type === "reconnect") {
     if (ws) try { ws.close(); } catch {}

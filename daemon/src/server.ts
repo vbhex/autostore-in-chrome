@@ -16,6 +16,7 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { WebSocketServer } from "ws";
 import type { ExtensionBus } from "./extension-bus.js";
 import { dispatch, listMethods } from "./rpc.js";
+import { readPairedUser } from "./handshake.js";
 
 export interface DaemonServerOpts {
   token: string;
@@ -89,6 +90,27 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse, ctx: HttpCt
       daemonVersion: ctx.daemonVersion,
       extension: ctx.bus.status(),
       methods: listMethods(),
+    });
+    return;
+  }
+
+  // GET /pair — unauthenticated auto-pair for the Chrome extension.
+  //
+  // Trust model: this is loopback only, same as the rest of the daemon. Any
+  // process running as the same OS user can already read the token file
+  // directly (mode 0600), so exposing it over loopback adds no real risk —
+  // it just lets the extension fetch it without filesystem access.
+  //
+  // Returns the bridge token and (if the Mac app has written user.json
+  // after Deakee login) the user identity. The extension uses this to
+  // skip the login UI entirely when the Mac app is already running.
+  if (req.method === "GET" && url.pathname === "/pair") {
+    const user = readPairedUser();
+    sendJson(res, 200, {
+      ok: true,
+      bridgeToken: ctx.token,
+      user: user ?? null,
+      daemonVersion: ctx.daemonVersion,
     });
     return;
   }

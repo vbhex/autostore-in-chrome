@@ -14,7 +14,26 @@ import { randomBytes } from "crypto";
 const CONFIG_DIR = join(homedir(), ".autostore-in-chrome");
 export const TOKEN_FILE = join(CONFIG_DIR, "token");
 export const PORT_FILE = join(CONFIG_DIR, "port");
+export const USER_FILE = join(CONFIG_DIR, "user.json");
 export const DEFAULT_PORT = 43117;
+
+/**
+ * Read the currently logged-in user, written by the Mac app after Deakee OAuth.
+ * Returns null if the file is missing or unparseable. Read every call so the
+ * daemon doesn't need to restart when the Mac app changes login state.
+ */
+export function readPairedUser(): null | { id: number | string; email?: string; name?: string; role?: string } {
+  try {
+    if (!existsSync(USER_FILE)) return null;
+    const raw = readFileSync(USER_FILE, "utf8").trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "id" in parsed) return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function loadOrCreateToken(): string {
   mkdirSync(CONFIG_DIR, { recursive: true });
