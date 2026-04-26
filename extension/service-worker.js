@@ -853,6 +853,99 @@ async function computer({
   }
 }
 
+// ─────────────────────────── Deakee OAuth (run from SW) ───────────────────────────
+// We MUST run launchWebAuthFlow from the service worker, not the popup.
+// Popups close when they lose focus, killing any await chain after the OAuth
+// window opens. The SW survives, lets us await the redirect, exchange the code,
+// and persist the JWT — then the popup picks up the new state on next open.
+
+const DEAKEE_AUTH_URL  = "https://deakee.com/en/auth/oauth/authorize";
+const OAUTH_CLIENT_ID  = "autostore";
+const OAUTH_SCOPE      = "profile";
+const DEFAULT_BACKEND  = "https://api.spriterock.com";
+
+async function loginWithDeakee() {
+  const { autoStoreBackend } = await chrome.storage.local.get(["autoStoreBackend"]);
+  const backend = (autoStoreBackend || DEFAULT_BACKEND).replace(/\/$/, "");
+  const redirectURL = chrome.identity.getRedirectURL();
+  const state = Math.random().toString(36).slice(2);
+
+  const params = new URLSearchParams({
+    client_id:     OAUTH_CLIENT_ID,
+    redirect_uri:  redirectURL,
+    response_type: "code",
+    scope:         OAUTH_SCOPE,
+    state,
+  });
+  const authURL = `${DEAKEE_AUTH_URL}?${params}`;
+
+  const responseURL = await new Promise((resolve, reject) => {
+    chrome.identity.launchWebAuthFlow(
+      { url: authURL, interactive: true },
+      (url) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!url)               reject(new Error("Login cancelled"));
+        else                         resolve(url);
+      }
+    );
+  });
+
+  const code = new URL(responseURL).searchParams.get("code");
+  if (!code) throw new Error("No authorization code received");
+
+  // Exchange code for AutoStore JWT
+  const exchangeRes = await fetch(`${backend}/api/auth/deakee/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, redirect_uri: redirectURL }),
+  });
+  if (!exchangeRes.ok) {
+    const err = await exchangeRes.json().catch(() => ({}));
+    throw new Error(err.message || `Token exchange failed (${exchangeRes.status})`);
+  }
+  const { access_token: jwt, user } = await exchangeRes.json();
+
+  // Try to also fetch the daemon bridge token (best-effort)
+  const port = 43117;
+  let bridgeToken = null;
+  try {
+    const authRes = await fetch(`http://127.0.0.1:${port}/auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jwt }),
+    });
+    if (authRes.ok) bridgeToken = (await authRes.json()).token || null;
+  } catch { /* daemon offline — that's fine */ }
+
+  await chrome.storage.local.set({
+    autoStoreJwt: jwt,
+    autoStoreUser: user,
+    autoStoreBackend: backend,
+    ...(bridgeToken ? { bridgeToken, bridgePort: port } : {}),
+  });
+
+  // Trigger a reconnect so the SW picks up the new bridge token
+  if (ws) try { ws.close(); } catch {}
+  connect();
+
+  return { ok: true, user, hasBridge: !!bridgeToken };
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "login_with_deakee") {
+    loginWithDeakee()
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
+    return true; // keep channel open for async response
+  }
+  if (msg?.type === "reconnect") {
+    if (ws) try { ws.close(); } catch {}
+    connect();
+    sendResponse({ ok: true });
+    return false;
+  }
+});
+
 // ─────────────────────────── lifecycle ───────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => { connect(); ensureKeepaliveAlarm(); });
