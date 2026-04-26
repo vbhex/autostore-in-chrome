@@ -84,6 +84,21 @@ interface HttpCtx {
 async function handleHttp(req: IncomingMessage, res: ServerResponse, ctx: HttpCtx) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
+  // CORS — the daemon listens on 127.0.0.1 only, so loopback is the trust
+  // boundary. Allowing any origin here is safe (no remote attacker can
+  // reach this socket) and lets the Chrome extension's service worker
+  // call /pair, /auth, /health from a chrome-extension:// origin.
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/health") {
     sendJson(res, 200, {
       ok: true,
