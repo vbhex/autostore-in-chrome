@@ -87,12 +87,11 @@ async function refreshStatus() {
 
 // ─── Boot ──────────────────────────────────────────────────
 // Ask SW to attempt an unauthenticated pair against the local daemon.
-// Succeeds the moment the Mac app is running. Storage observer picks up
-// the result and flips the UI to the paired state.
-chrome.runtime.sendMessage({ type: "try_pair" }).catch(() => {}).finally(syncFromStorage);
-setInterval(() => {
-  // Re-attempt pairing every 3s while popup is open — covers "started Mac
-  // app right after opening popup" race.
-  chrome.runtime.sendMessage({ type: "try_pair" }).catch(() => {});
-  refreshStatus();
-}, 3000);
+// Succeeds the moment the Mac app is running. We re-sync after every
+// attempt so the UI flips even if storage notifications were missed.
+async function attemptPair() {
+  try { await chrome.runtime.sendMessage({ type: "try_pair" }); } catch {}
+  await syncFromStorage();
+}
+attemptPair();
+setInterval(attemptPair, 3000);

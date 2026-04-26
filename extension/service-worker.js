@@ -92,10 +92,14 @@ async function connect() {
   clearTimeout(reconnectTimer);
   let { token, port } = await getConfig();
 
-  // No token stored — try the unauthenticated auto-pair first (Mac app
-  // running on this machine), then fall back to JWT-based pairing.
-  if (!token) {
-    token = (await tryAutoPair(port)) || (await autoFetchBridgeToken(port)) || "";
+  // Always run /pair when we don't have user info yet — covers the case
+  // where an older build of the extension stored a bridgeToken without a
+  // paired user, and ensures the popup gets the identity from the Mac app.
+  const { autoStoreUser } = await chrome.storage.local.get("autoStoreUser");
+  if (!token || !autoStoreUser) {
+    const paired = await tryAutoPair(port);
+    if (paired) token = paired;
+    else if (!token) token = (await autoFetchBridgeToken(port)) || "";
   }
 
   if (!token) {
