@@ -759,20 +759,124 @@ async function computer({
           cssH = Math.round(metrics.cssLayoutViewport?.clientHeight ?? metrics.layoutViewport?.clientHeight ?? 0);
         } catch (_) {}
 
-        const scale = 1 / dpr;
+        // ── Annotated screenshot ─────────────────────────────────────
+        // Collect visible interactive elements, inject numbered orange
+        // labels directly into the DOM, capture, then clean up.
+        // The model can then say "click [3]" instead of guessing coords.
+        let elements = [];
+        try {
+          const [{ result: elems }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: (vpW, vpH) => {
+              const sel = [
+                "a[href]", "button", "input:not([type=hidden])", "select", "textarea",
+                "[role=button]", "[role=link]", "[role=tab]", "[role=menuitem]",
+                "[role=checkbox]", "[role=radio]", "[role=combobox]", "[role=option]",
+                "[onclick]", "[tabindex]",
+              ].join(",");
+              const seen = new Set();
+              const out = [];
+              document.querySelectorAll(sel).forEach((el) => {
+                const r = el.getBoundingClientRect();
+                // Skip zero-size, off-screen, or duplicate rects
+                if (r.width < 4 || r.height < 4) return;
+                if (r.bottom < 0 || r.top > vpH || r.right < 0 || r.left > vpW) return;
+                const key = `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                const label = (
+                  el.getAttribute("aria-label") ||
+                  el.getAttribute("title") ||
+                  el.getAttribute("placeholder") ||
+                  (el.innerText || el.textContent || "").trim()
+                ).replace(/\s+/g, " ").slice(0, 50);
+                const tag = el.tagName.toLowerCase();
+                const type = el.getAttribute("type") || "";
+                out.push({
+                  tag: type ? `${tag}[${type}]` : tag,
+                  label,
+                  x: Math.round(r.left + r.width  / 2),
+                  y: Math.round(r.top  + r.height / 2),
+                  rx: Math.round(r.left), ry: Math.round(r.top),
+                  rw: Math.round(r.width), rh: Math.round(r.height),
+                });
+              });
+              return out.slice(0, 60); // cap — more than 60 is noise
+            },
+            args: [cssW || 1280, cssH || 800],
+          });
+          elements = Array.isArray(elems) ? elems : [];
+        } catch (_) { /* annotation is best-effort */ }
+
+        // Inject numbered orange labels into the page
+        if (elements.length > 0) {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId },
+              world: "MAIN",
+              func: (elems) => {
+                document.getElementById("__as_annot__")?.remove();
+                const host = document.createElement("div");
+                host.id = "__as_annot__";
+                host.style.cssText = "position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647";
+                elems.forEach((el, i) => {
+                  const badge = document.createElement("div");
+                  // Place badge at top-left corner of element rect
+                  badge.style.cssText = `
+                    position:fixed;left:${el.rx}px;top:${el.ry}px;
+                    min-width:18px;height:18px;
+                    background:#FF6600;color:#fff;
+                    font:bold 11px/18px monospace;text-align:center;
+                    border-radius:3px;padding:0 3px;
+                    box-shadow:0 1px 3px rgba(0,0,0,.5);
+                  `.replace(/\s+/g, " ");
+                  badge.textContent = String(i + 1);
+                  host.appendChild(badge);
+                });
+                document.documentElement.appendChild(host);
+              },
+              args: [elements],
+            });
+            // Brief pause so the browser paints the overlay
+            await new Promise((r) => setTimeout(r, 120));
+          } catch (_) {}
+        }
+
+        // Capture with overlay present
         const { data } = await chrome.debugger.sendCommand(
           debuggee, "Page.captureScreenshot",
           { format: "png", quality: 85, captureBeyondViewport: false,
             clip: cssW > 0 ? { x: 0, y: 0, width: cssW, height: cssH, scale: 1 } : undefined,
           }
         );
+
+        // Remove overlay immediately after capture
+        if (elements.length > 0) {
+          chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: () => document.getElementById("__as_annot__")?.remove(),
+          }).catch(() => {});
+        }
+
+        // Build element index for the model to reference
+        const elementIndex = elements.length > 0
+          ? "\n\nInteractive Elements (orange numbers on screenshot):\n" +
+            elements.map((el, i) =>
+              `  [${i + 1}] ${el.tag.padEnd(16)} (${el.x},${el.y})  ${el.label || "(no label)"}`
+            ).join("\n") +
+            "\nTo click an element: computer(action=\"left_click\", coordinate=[x,y]) using the coordinates above."
+          : "";
+
         const hint = cssW > 0
           ? `\n[Viewport: ${cssW}×${cssH} CSS px | devicePixelRatio: ${dpr} | Screenshot normalised to CSS px — click coordinates = image pixel coordinates, NO scaling needed]`
           : `\n[devicePixelRatio: ${dpr} | click coordinates = image pixel coordinates]`;
+
         return {
-          screenshot: data,               // base64 PNG, normalised to CSS pixels
+          screenshot: data,               // base64 PNG with numbered orange labels
           mimeType: "image/png",
-          tabContext: await tabContext() + hint,
+          tabContext: await tabContext() + hint + elementIndex,
         };
       }
 
